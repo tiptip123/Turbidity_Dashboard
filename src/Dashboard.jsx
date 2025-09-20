@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabaseClient';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
@@ -9,25 +9,68 @@ const Dashboard = () => {
     latest: 0,
     average: 0,
     highest: 0,
-    trend: 'stable' // rising, falling, stable
+    trend: 'stable'
   });
   const [error, setError] = useState(null);
-  const [alertLevel, setAlertLevel] = useState('normal'); // normal, warning, danger, critical
+  const [alertLevel, setAlertLevel] = useState('normal');
+  const [lastUpdate, setLastUpdate] = useState(new Date());
+  const [isLive, setIsLive] = useState(true);
+  
+  const lastDataId = useRef(0);
 
-  // Threshold configuration for flood prediction
+  // Threshold configuration
   const thresholds = {
-    normal: 1500,     // NTU - Normal sediment levels
-    warning: 2000,    // NTU - Increased sediment, monitor closely
-    danger: 3000,     // NTU - High sediment, flood risk increasing
-    critical: 5000    // NTU - Critical levels, immediate action needed
+    normal: 1500,
+    warning: 2000,
+    danger: 3000,
+    critical: 5000
   };
 
   useEffect(() => {
     fetchTurbidityData();
-    // Refresh data every 5 minutes for real-time monitoring
-    const interval = setInterval(fetchTurbidityData, 300000);
-    return () => clearInterval(interval);
-  }, []);
+    
+    // Set up polling interval (every 5 seconds)
+    const intervalId = setInterval(() => {
+      if (isLive) {
+        checkForNewData();
+      }
+    }, 5000);
+
+    // Cleanup on component unmount
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [isLive]);
+
+  // Check for new data without full refresh
+  const checkForNewData = async () => {
+    try {
+      // Get only the most recent entry to check if there's new data
+      const { data, error } = await supabase
+        .from('turbidity_readings')
+        .select('id, value, created_at')
+        .order('id', { ascending: false })
+        .limit(1);
+
+      if (error) {
+        console.error('Error checking for new data:', error);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        const latestId = data[0].id;
+        
+        // If we have new data, fetch the complete dataset
+        if (latestId > lastDataId.current) {
+          console.log('New data detected, refreshing...');
+          lastDataId.current = latestId;
+          fetchTurbidityData();
+        }
+      }
+    } catch (error) {
+      console.error('Error in data check:', error);
+    }
+  };
 
   const fetchTurbidityData = async () => {
     try {
@@ -36,9 +79,9 @@ const Dashboard = () => {
 
       const { data, error: supabaseError } = await supabase
         .from('turbidity_readings')
-        .select('value, created_at')
+        .select('id, value, created_at')
         .order('created_at', { ascending: false })
-        .limit(100); // Get more data for trend analysis
+        .limit(100);
 
       if (supabaseError) {
         console.error('Supabase error:', supabaseError);
@@ -47,34 +90,10 @@ const Dashboard = () => {
       }
 
       if (data && data.length > 0) {
-        const formattedData = data.map(item => ({
-          time: new Date(item.created_at).toLocaleTimeString(),
-          value: item.value,
-          fullDate: new Date(item.created_at),
-          date: new Date(item.created_at).toLocaleDateString()
-        })).reverse();
-
-        // Calculate statistics
-        const values = data.map(item => item.value);
-        const latest = values[0];
-        const average = values.reduce((sum, val) => sum + val, 0) / values.length;
-        const highest = Math.max(...values);
-
-        // Calculate trend (rising, falling, stable)
-        const recentValues = values.slice(0, 10); // Last 10 readings
-        const trend = calculateTrend(recentValues);
-
-        // Determine alert level based on thresholds and trend
-        const alert = determineAlertLevel(latest, average, trend);
-
-        setTurbidityData(formattedData);
-        setStats({ 
-          latest, 
-          average: Math.round(average), 
-          highest,
-          trend
-        });
-        setAlertLevel(alert);
+        // Store the latest ID for change detection
+        lastDataId.current = data[0].id;
+        processTurbidityData(data);
+        setLastUpdate(new Date());
       } else {
         setError('No data found in turbidity_readings table');
       }
@@ -84,6 +103,32 @@ const Dashboard = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const processTurbidityData = (data) => {
+    const formattedData = data.map(item => ({
+      time: new Date(item.created_at).toLocaleTimeString(),
+      value: item.value,
+      fullDate: new Date(item.created_at),
+      date: new Date(item.created_at).toLocaleDateString(),
+      id: item.id
+    })).reverse();
+
+    const values = data.map(item => item.value);
+    const latest = values[0];
+    const average = values.reduce((sum, val) => sum + val, 0) / values.length;
+    const highest = Math.max(...values);
+    const trend = calculateTrend(values.slice(0, 10));
+    const alert = determineAlertLevel(latest, average, trend);
+
+    setTurbidityData(formattedData);
+    setStats({ 
+      latest, 
+      average: Math.round(average), 
+      highest,
+      trend
+    });
+    setAlertLevel(alert);
   };
 
   const calculateTrend = (values) => {
@@ -155,10 +200,14 @@ const Dashboard = () => {
     return 'LOW RISK: Normal sediment levels. Continue regular monitoring.';
   };
 
+  const toggleLiveUpdates = () => {
+    setIsLive(!isLive);
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">Loading flood monitoring data...</div>
+        <div className="text-xl text-gray-600">Loading real-time flood monitoring data...</div>
       </div>
     );
   }
@@ -168,6 +217,27 @@ const Dashboard = () => {
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
+        {/* Real-time Status Bar */}
+        <div className="bg-blue-100 border border-blue-400 text-blue-800 px-4 py-2 rounded-lg mb-4 flex justify-between items-center">
+          <div className="flex items-center">
+            <span className="text-xl mr-2">{isLive ? '🔄' : '⏸️'}</span>
+            <span>
+              {isLive ? 'Live monitoring active' : 'Updates paused'} 
+              <span className="text-sm ml-2">
+                Last update: {lastUpdate.toLocaleTimeString()}
+              </span>
+            </span>
+          </div>
+          <button
+            onClick={toggleLiveUpdates}
+            className={`px-3 py-1 rounded text-sm ${
+              isLive ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'
+            } text-white`}
+          >
+            {isLive ? 'Pause' : 'Resume'}
+          </button>
+        </div>
+
         {/* Alert Banner */}
         <div className={`bg-${alertConfig.color}-100 border border-${alertConfig.color}-400 text-${alertConfig.color}-800 px-6 py-4 rounded-lg mb-6`}>
           <div className="flex items-center">
@@ -179,7 +249,7 @@ const Dashboard = () => {
           </div>
         </div>
 
-        <h1 className="text-3xl font-bold text-gray-800 mb-8">Flood Monitoring Dashboard</h1>
+        <h1 className="text-3xl font-bold text-gray-800 mb-8">Real-time Flood Monitoring Dashboard</h1>
         
         {error && (
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
@@ -188,7 +258,7 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* Stats Cards with Trend Analysis */}
+        {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           {/* Alert Level Card */}
           <div className="bg-white rounded-lg shadow-md p-6">
@@ -238,7 +308,7 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Chart Section with Threshold Lines */}
+        {/* Chart Section */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
           <h2 className="text-xl font-semibold text-gray-700 mb-6">Sediment Monitoring Timeline</h2>
           {turbidityData.length > 0 ? (
@@ -261,7 +331,6 @@ const Dashboard = () => {
                       offset: -10 
                     }}
                   />
-                  {/* Threshold Lines */}
                   <ReferenceLine y={thresholds.normal} stroke="green" strokeDasharray="3 3" label="Normal" />
                   <ReferenceLine y={thresholds.warning} stroke="orange" strokeDasharray="3 3" label="Warning" />
                   <ReferenceLine y={thresholds.danger} stroke="red" strokeDasharray="3 3" label="Danger" />
@@ -297,30 +366,6 @@ const Dashboard = () => {
           )}
         </div>
 
-        {/* Flood Prediction Analysis */}
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-xl font-semibold text-gray-700 mb-4">Flood Risk Assessment</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <h3 className="font-semibold text-lg mb-3">📋 Risk Analysis</h3>
-              <div className="space-y-2">
-                <p><strong>Current Risk Level:</strong> <span className={getStatusColor(stats.latest)}>{alertLevel.toUpperCase()}</span></p>
-                <p><strong>Trend Direction:</strong> {getTrendIcon(stats.trend)} {stats.trend.toUpperCase()}</p>
-                <p><strong>Predicted Impact:</strong> {predictCloggingRisk()}</p>
-              </div>
-            </div>
-            <div>
-              <h3 className="font-semibold text-lg mb-3">📊 Threshold Guidelines</h3>
-              <div className="space-y-1 text-sm">
-                <p>🟢 <strong>Normal:</strong> &lt; {thresholds.normal} NTU - Safe levels</p>
-                <p>🟡 <strong>Warning:</strong> &gt; {thresholds.warning} NTU - Monitor closely</p>
-                <p>🟠 <strong>Danger:</strong> &gt; {thresholds.danger} NTU - Prepare for action</p>
-                <p>🔴 <strong>Critical:</strong> &gt; {thresholds.critical} NTU - Immediate response</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Refresh Button */}
         <div className="flex justify-center">
           <button
@@ -330,7 +375,7 @@ const Dashboard = () => {
             <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-            Update Monitoring Data
+            Manual Refresh
           </button>
         </div>
       </div>
