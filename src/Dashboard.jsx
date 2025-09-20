@@ -15,8 +15,10 @@ const Dashboard = () => {
   const [alertLevel, setAlertLevel] = useState('normal');
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [isLive, setIsLive] = useState(true);
+  const [newDataAlert, setNewDataAlert] = useState(false);
   
   const lastDataId = useRef(0);
+  const chartDataRef = useRef([]);
 
   // Threshold configuration
   const thresholds = {
@@ -29,12 +31,12 @@ const Dashboard = () => {
   useEffect(() => {
     fetchTurbidityData();
     
-    // Set up polling interval (every 5 seconds)
+    // Set up polling interval (reduced from 5s to 10s)
     const intervalId = setInterval(() => {
       if (isLive) {
         checkForNewData();
       }
-    }, 5000);
+    }, 10000); // Changed from 5000 to 10000
 
     // Cleanup on component unmount
     return () => {
@@ -60,15 +62,68 @@ const Dashboard = () => {
       if (data && data.length > 0) {
         const latestId = data[0].id;
         
-        // If we have new data, fetch the complete dataset
+        // If we have new data, fetch only the new data
         if (latestId > lastDataId.current) {
-          console.log('New data detected, refreshing...');
-          lastDataId.current = latestId;
-          fetchTurbidityData();
+          console.log('New data detected, fetching incrementally...');
+          fetchNewData(lastDataId.current);
         }
       }
     } catch (error) {
       console.error('Error in data check:', error);
+    }
+  };
+
+  // Fetch only new data since last known ID
+  const fetchNewData = async (sinceId) => {
+    try {
+      const { data, error } = await supabase
+        .from('turbidity_readings')
+        .select('id, value, created_at')
+        .gt('id', sinceId)
+        .order('id', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching new data:', error);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        // Process and append new data
+        const newDataPoints = data.map(item => ({
+          time: new Date(item.created_at).toLocaleTimeString(),
+          value: item.value,
+          fullDate: new Date(item.created_at),
+          date: new Date(item.created_at).toLocaleDateString(),
+          id: item.id
+        }));
+
+        // Update the last known ID
+        lastDataId.current = data[data.length - 1].id;
+        
+        // Append new data to existing data (limit to 100 points)
+        const updatedData = [...turbidityData, ...newDataPoints];
+        if (updatedData.length > 100) {
+          updatedData.splice(0, updatedData.length - 100); // Keep only the latest 100 points
+        }
+        
+        // Update state with the new data
+        setTurbidityData(updatedData);
+        chartDataRef.current = updatedData;
+        
+        // Update statistics incrementally
+        updateStatsIncrementally(updatedData);
+        
+        // Show new data alert
+        setNewDataAlert(true);
+        setLastUpdate(new Date());
+        
+        // Auto-dismiss alert after 5 seconds
+        setTimeout(() => {
+          setNewDataAlert(false);
+        }, 5000);
+      }
+    } catch (error) {
+      console.error('Error processing new data:', error);
     }
   };
 
@@ -122,9 +177,36 @@ const Dashboard = () => {
     const alert = determineAlertLevel(latest, average, trend);
 
     setTurbidityData(formattedData);
+    chartDataRef.current = formattedData;
     setStats({ 
       latest, 
       average: Math.round(average), 
+      highest,
+      trend
+    });
+    setAlertLevel(alert);
+  };
+
+  // Update statistics incrementally without recalculating everything
+  const updateStatsIncrementally = (data) => {
+    if (data.length === 0) return;
+    
+    const values = data.map(item => item.value);
+    const latest = values[values.length - 1];
+    const highest = Math.max(stats.highest, latest);
+    
+    // Calculate average incrementally (more efficient for large datasets)
+    const newAverage = (stats.average * turbidityData.length + latest) / (turbidityData.length + 1);
+    
+    // Calculate trend based on recent values
+    const recentValues = values.slice(-10);
+    const trend = calculateTrend(recentValues);
+    
+    const alert = determineAlertLevel(latest, newAverage, trend);
+
+    setStats({ 
+      latest, 
+      average: Math.round(newAverage), 
       highest,
       trend
     });
@@ -237,6 +319,22 @@ const Dashboard = () => {
             {isLive ? 'Pause' : 'Resume'}
           </button>
         </div>
+
+        {/* New Data Alert (dismissible) */}
+        {newDataAlert && (
+          <div className="bg-green-100 border border-green-400 text-green-800 px-4 py-3 rounded-lg mb-4 flex justify-between items-center">
+            <div className="flex items-center">
+              <span className="text-lg mr-2">📊</span>
+              <span>New data received and processed</span>
+            </div>
+            <button
+              onClick={() => setNewDataAlert(false)}
+              className="text-green-800 hover:text-green-600 text-lg"
+            >
+              &times;
+            </button>
+          </div>
+        )}
 
         {/* Alert Banner */}
         <div className={`bg-${alertConfig.color}-100 border border-${alertConfig.color}-400 text-${alertConfig.color}-800 px-6 py-4 rounded-lg mb-6`}>
@@ -352,6 +450,8 @@ const Dashboard = () => {
                     strokeWidth={3}
                     dot={{ fill: '#3b82f6', strokeWidth: 2, r: 4 }}
                     activeDot={{ r: 6, fill: '#1d4ed8' }}
+                    isAnimationActive={true}
+                    animationDuration={500}
                   />
                 </LineChart>
               </ResponsiveContainer>
