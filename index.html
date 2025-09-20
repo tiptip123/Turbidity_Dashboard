@@ -4,7 +4,44 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React</title>
+    <title>Water Quality Dashboard</title>
+    <!-- Add TailwindCSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              blue: {
+                600: '#2563eb',
+                700: '#1d4ed8',
+              },
+              purple: {
+                600: '#9333ea',
+              },
+              red: {
+                600: '#dc2626',
+              },
+              green: {
+                600: '#16a34a',
+              },
+              gray: {
+                50: '#f9fafb',
+                100: '#f3f4f6',
+                200: '#e5e7eb',
+                300: '#d1d5db',
+                400: '#9ca3af',
+                500: '#6b7280',
+                600: '#4b5563',
+                700: '#374151',
+                800: '#1f2937',
+                900: '#111827',
+              }
+            }
+          }
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
