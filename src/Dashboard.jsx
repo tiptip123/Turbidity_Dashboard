@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
@@ -19,6 +19,14 @@ const Dashboard = () => {
   
   const lastDataId = useRef(0);
   const chartDataRef = useRef([]);
+  const statsRef = useRef(stats);
+  const turbidityDataRef = useRef(turbidityData);
+
+  // Update refs when state changes
+  useEffect(() => {
+    statsRef.current = stats;
+    turbidityDataRef.current = turbidityData;
+  }, [stats, turbidityData]);
 
   // Threshold configuration
   const thresholds = {
@@ -28,21 +36,54 @@ const Dashboard = () => {
     critical: 5000
   };
 
+  const fetchTurbidityData = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const { data, error: supabaseError } = await supabase
+        .from('turbidity_readings')
+        .select('id, value, created_at')
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (supabaseError) {
+        console.error('Supabase error:', supabaseError);
+        setError('Failed to fetch data from database');
+        return;
+      }
+
+      if (data && data.length > 0) {
+        // Store the latest ID for change detection
+        lastDataId.current = data[0].id;
+        processTurbidityData(data);
+        setLastUpdate(new Date());
+      } else {
+        setError('No data found in turbidity_readings table');
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      setError('An unexpected error occurred');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchTurbidityData();
     
-    // Set up polling interval (reduced from 5s to 10s)
+    // Set up polling interval
     const intervalId = setInterval(() => {
       if (isLive) {
         checkForNewData();
       }
-    }, 10000); // Changed from 5000 to 10000
+    }, 10000);
 
     // Cleanup on component unmount
     return () => {
       clearInterval(intervalId);
     };
-  }, [isLive]);
+  }, [isLive, fetchTurbidityData]);
 
   // Check for new data without full refresh
   const checkForNewData = async () => {
@@ -64,7 +105,6 @@ const Dashboard = () => {
         
         // If we have new data, fetch only the new data
         if (latestId > lastDataId.current) {
-          console.log('New data detected, fetching incrementally...');
           fetchNewData(lastDataId.current);
         }
       }
@@ -101,7 +141,7 @@ const Dashboard = () => {
         lastDataId.current = data[data.length - 1].id;
         
         // Append new data to existing data (limit to 100 points)
-        const updatedData = [...turbidityData, ...newDataPoints];
+        const updatedData = [...turbidityDataRef.current, ...newDataPoints];
         if (updatedData.length > 100) {
           updatedData.splice(0, updatedData.length - 100); // Keep only the latest 100 points
         }
@@ -124,39 +164,6 @@ const Dashboard = () => {
       }
     } catch (error) {
       console.error('Error processing new data:', error);
-    }
-  };
-
-  const fetchTurbidityData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const { data, error: supabaseError } = await supabase
-        .from('turbidity_readings')
-        .select('id, value, created_at')
-        .order('created_at', { ascending: false })
-        .limit(100);
-
-      if (supabaseError) {
-        console.error('Supabase error:', supabaseError);
-        setError('Failed to fetch data from database');
-        return;
-      }
-
-      if (data && data.length > 0) {
-        // Store the latest ID for change detection
-        lastDataId.current = data[0].id;
-        processTurbidityData(data);
-        setLastUpdate(new Date());
-      } else {
-        setError('No data found in turbidity_readings table');
-      }
-    } catch (error) {
-      console.error('Error:', error);
-      setError('An unexpected error occurred');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -193,10 +200,10 @@ const Dashboard = () => {
     
     const values = data.map(item => item.value);
     const latest = values[values.length - 1];
-    const highest = Math.max(stats.highest, latest);
+    const highest = Math.max(statsRef.current.highest, latest);
     
     // Calculate average incrementally (more efficient for large datasets)
-    const newAverage = (stats.average * turbidityData.length + latest) / (turbidityData.length + 1);
+    const newAverage = (statsRef.current.average * turbidityDataRef.current.length + latest) / (turbidityDataRef.current.length + 1);
     
     // Calculate trend based on recent values
     const recentValues = values.slice(-10);
