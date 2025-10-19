@@ -16,6 +16,7 @@ const Dashboard = () => {
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [isLive, setIsLive] = useState(true);
   const [newDataAlert, setNewDataAlert] = useState(false);
+  const [riskAssessment, setRiskAssessment] = useState(null);
   
   const lastDataId = useRef(0);
   const chartDataRef = useRef([]);
@@ -28,12 +29,50 @@ const Dashboard = () => {
     turbidityDataRef.current = turbidityData;
   }, [stats, turbidityData]);
 
-  // Threshold configuration
+  // CORRECTED: Reversed threshold configuration
+  // Clear water = LOW NTU = Normal
+  // Turbid water = HIGH NTU = Warning/Danger
   const thresholds = {
-    normal: 1500,
-    warning: 2000,
-    danger: 3000,
-    critical: 5000
+    normal: 100,       // Clear water: 0-100 NTU
+    warning: 500,      // Slightly turbid: 100-500 NTU  
+    danger: 1000,      // Moderately turbid: 500-1000 NTU
+    critical: 1500     // Highly turbid: 1000+ NTU
+  };
+
+  // CORRECTED: Reversed risk prediction logic
+  const predictCloggingRisk = (latest, average, trend, currentAlertLevel) => {
+    if (currentAlertLevel === 'critical' || latest >= thresholds.critical) {
+      return {
+        risk: 'EXTREME',
+        timeframe: 'IMMEDIATE (0-6 hours)',
+        action: 'EVACUATE: Critical sediment levels detected',
+        probability: '90-100%',
+        consequences: 'Immediate clogging danger, flood imminent'
+      };
+    } else if (currentAlertLevel === 'danger' || latest >= thresholds.danger) {
+      return {
+        risk: 'HIGH',
+        timeframe: '24-48 hours',
+        action: 'PREPARE: Significant sediment buildup',
+        probability: '70-90%',
+        consequences: 'Flood likely if trend continues'
+      };
+    } else if (currentAlertLevel === 'warning' || latest >= thresholds.warning) {
+      return {
+        risk: 'MODERATE',
+        timeframe: '3-7 days if trend continues',
+        action: 'MONITOR: Elevated sediment levels',
+        probability: '40-70%',
+        consequences: 'Reduced drainage capacity'
+      };
+    }
+    return {
+      risk: 'LOW',
+      timeframe: 'No immediate threat',
+      action: 'NORMAL: Clear water conditions',
+      probability: '0-10%',
+      consequences: 'Normal water flow'
+    };
   };
 
   const fetchTurbidityData = useCallback(async () => {
@@ -58,6 +97,7 @@ const Dashboard = () => {
         lastDataId.current = data[0].id;
         processTurbidityData(data);
         setLastUpdate(new Date());
+        setError(null);
       } else {
         setError('No data found in turbidity_readings table');
       }
@@ -72,14 +112,12 @@ const Dashboard = () => {
   useEffect(() => {
     fetchTurbidityData();
     
-    // Set up polling interval
     const intervalId = setInterval(() => {
       if (isLive) {
         checkForNewData();
       }
     }, 10000);
 
-    // Cleanup on component unmount
     return () => {
       clearInterval(intervalId);
     };
@@ -88,7 +126,6 @@ const Dashboard = () => {
   // Check for new data without full refresh
   const checkForNewData = async () => {
     try {
-      // Get only the most recent entry to check if there's new data
       const { data, error } = await supabase
         .from('turbidity_readings')
         .select('id, value, created_at')
@@ -103,7 +140,6 @@ const Dashboard = () => {
       if (data && data.length > 0) {
         const latestId = data[0].id;
         
-        // If we have new data, fetch only the new data
         if (latestId > lastDataId.current) {
           fetchNewData(lastDataId.current);
         }
@@ -128,7 +164,6 @@ const Dashboard = () => {
       }
 
       if (data && data.length > 0) {
-        // Process and append new data
         const newDataPoints = data.map(item => ({
           time: new Date(item.created_at).toLocaleTimeString(),
           value: item.value,
@@ -137,27 +172,20 @@ const Dashboard = () => {
           id: item.id
         }));
 
-        // Update the last known ID
         lastDataId.current = data[data.length - 1].id;
         
-        // Append new data to existing data (limit to 100 points)
         const updatedData = [...turbidityDataRef.current, ...newDataPoints];
         if (updatedData.length > 100) {
-          updatedData.splice(0, updatedData.length - 100); // Keep only the latest 100 points
+          updatedData.splice(0, updatedData.length - 100);
         }
         
-        // Update state with the new data
         setTurbidityData(updatedData);
         chartDataRef.current = updatedData;
-        
-        // Update statistics incrementally
         updateStatsIncrementally(updatedData);
         
-        // Show new data alert
         setNewDataAlert(true);
         setLastUpdate(new Date());
         
-        // Auto-dismiss alert after 5 seconds
         setTimeout(() => {
           setNewDataAlert(false);
         }, 5000);
@@ -182,6 +210,9 @@ const Dashboard = () => {
     const highest = Math.max(...values);
     const trend = calculateTrend(values.slice(0, 10));
     const alert = determineAlertLevel(latest, average, trend);
+    
+    const risk = predictCloggingRisk(latest, average, trend, alert);
+    setRiskAssessment(risk);
 
     setTurbidityData(formattedData);
     chartDataRef.current = formattedData;
@@ -194,7 +225,7 @@ const Dashboard = () => {
     setAlertLevel(alert);
   };
 
-  // Update statistics incrementally without recalculating everything
+  // Update statistics incrementally
   const updateStatsIncrementally = (data) => {
     if (data.length === 0) return;
     
@@ -202,14 +233,14 @@ const Dashboard = () => {
     const latest = values[values.length - 1];
     const highest = Math.max(statsRef.current.highest, latest);
     
-    // Calculate average incrementally (more efficient for large datasets)
     const newAverage = (statsRef.current.average * turbidityDataRef.current.length + latest) / (turbidityDataRef.current.length + 1);
     
-    // Calculate trend based on recent values
     const recentValues = values.slice(-10);
     const trend = calculateTrend(recentValues);
     
     const alert = determineAlertLevel(latest, newAverage, trend);
+    const risk = predictCloggingRisk(latest, newAverage, trend, alert);
+    setRiskAssessment(risk);
 
     setStats({ 
       latest, 
@@ -234,34 +265,64 @@ const Dashboard = () => {
     return 'stable';
   };
 
+  // CORRECTED: Reversed alert level determination
   const determineAlertLevel = (latest, average, trend) => {
     if (latest >= thresholds.critical || average >= thresholds.critical) {
-      return 'critical';
+      return 'critical'; // High NTU = High sediment = Critical
     } else if (latest >= thresholds.danger || average >= thresholds.danger) {
       return trend === 'rising' ? 'critical' : 'danger';
     } else if (latest >= thresholds.warning || average >= thresholds.warning) {
       return trend === 'rising' ? 'danger' : 'warning';
-    } else if (latest >= thresholds.normal || average >= thresholds.normal) {
+    } else if (latest >= thresholds.normal) {
       return trend === 'rising' ? 'warning' : 'normal';
     }
-    return 'normal';
+    return 'normal'; // Low NTU = Clear water = Normal
   };
 
   const getAlertConfig = (level) => {
     const configs = {
-      normal: { color: 'green', icon: '✅', message: 'Normal sediment levels' },
-      warning: { color: 'yellow', icon: '⚠️', message: 'Elevated sediments - Monitor closely' },
-      danger: { color: 'orange', icon: '🚨', message: 'High sediment levels - Flood risk increasing' },
-      critical: { color: 'red', icon: '🔥', message: 'CRITICAL: Immediate action required - High flood risk' }
+      normal: { 
+        color: 'green', 
+        icon: '✅', 
+        message: 'Clear water - Normal conditions',
+        bgColor: 'bg-green-100',
+        borderColor: 'border-green-400',
+        textColor: 'text-green-800'
+      },
+      warning: { 
+        color: 'yellow', 
+        icon: '⚠️', 
+        message: 'Slight turbidity - Monitor closely',
+        bgColor: 'bg-yellow-100',
+        borderColor: 'border-yellow-400',
+        textColor: 'text-yellow-800'
+      },
+      danger: { 
+        color: 'orange', 
+        icon: '🚨', 
+        message: 'Moderate turbidity - Flood risk increasing',
+        bgColor: 'bg-orange-100',
+        borderColor: 'border-orange-400',
+        textColor: 'text-orange-800'
+      },
+      critical: { 
+        color: 'red', 
+        icon: '🔥', 
+        message: 'High turbidity - Immediate action required',
+        bgColor: 'bg-red-100',
+        borderColor: 'border-red-400',
+        textColor: 'text-red-800'
+      }
     };
     return configs[level] || configs.normal;
   };
 
+  // CORRECTED: Reversed status messages
   const getStatus = (value) => {
-    if (value >= thresholds.critical) return '🔥 Critical';
-    if (value >= thresholds.danger) return '🚨 Danger';
-    if (value >= thresholds.warning) return '⚠️ Warning';
-    return '✅ Normal';
+    if (value >= thresholds.critical) return '🔥 Critical Turbidity';
+    if (value >= thresholds.danger) return '🚨 High Turbidity';
+    if (value >= thresholds.warning) return '⚠️ Moderate Turbidity';
+    return '✅ Clear Water';
   };
 
   const getStatusColor = (value) => {
@@ -275,18 +336,13 @@ const Dashboard = () => {
     return trend === 'rising' ? '📈' : trend === 'falling' ? '📉' : '➡️';
   };
 
-  const predictCloggingRisk = () => {
-    const { latest, average, trend } = stats;
-    const alertConfig = getAlertConfig(alertLevel);
-    
-    if (alertLevel === 'critical') {
-      return 'IMMEDIATE ACTION: High risk of clogging and flooding. Evacuation may be necessary.';
-    } else if (alertLevel === 'danger') {
-      return 'HIGH RISK: Sediment buildup detected. Flood likely within 24-48 hours if trend continues.';
-    } else if (alertLevel === 'warning') {
-      return 'MODERATE RISK: Increasing sediments. Monitor closely for rapid changes.';
+  const getRiskColor = (riskLevel) => {
+    switch (riskLevel) {
+      case 'EXTREME': return 'text-red-700 bg-red-100';
+      case 'HIGH': return 'text-orange-700 bg-orange-100';
+      case 'MODERATE': return 'text-yellow-700 bg-yellow-100';
+      default: return 'text-green-700 bg-green-100';
     }
-    return 'LOW RISK: Normal sediment levels. Continue regular monitoring.';
   };
 
   const toggleLiveUpdates = () => {
@@ -327,7 +383,7 @@ const Dashboard = () => {
           </button>
         </div>
 
-        {/* New Data Alert (dismissible) */}
+        {/* New Data Alert */}
         {newDataAlert && (
           <div className="bg-green-100 border border-green-400 text-green-800 px-4 py-3 rounded-lg mb-4 flex justify-between items-center">
             <div className="flex items-center">
@@ -344,17 +400,41 @@ const Dashboard = () => {
         )}
 
         {/* Alert Banner */}
-        <div className={`bg-${alertConfig.color}-100 border border-${alertConfig.color}-400 text-${alertConfig.color}-800 px-6 py-4 rounded-lg mb-6`}>
-          <div className="flex items-center">
-            <span className="text-2xl mr-3">{alertConfig.icon}</span>
-            <div>
-              <h2 className="text-xl font-bold">Flood Alert: {alertConfig.message}</h2>
-              <p className="text-sm mt-1">{predictCloggingRisk()}</p>
+        <div className={`${alertConfig.bgColor} border ${alertConfig.borderColor} ${alertConfig.textColor} px-6 py-4 rounded-lg mb-6`}>
+          <div className="flex items-start">
+            <span className="text-2xl mr-3 mt-1">{alertConfig.icon}</span>
+            <div className="flex-1">
+              <h2 className="text-xl font-bold">Turbidity Alert: {alertConfig.message}</h2>
+              {riskAssessment && (
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
+                  <div>
+                    <strong>Risk Level:</strong>
+                    <span className={`ml-2 px-2 py-1 rounded ${getRiskColor(riskAssessment.risk)}`}>
+                      {riskAssessment.risk}
+                    </span>
+                  </div>
+                  <div>
+                    <strong>Timeframe:</strong>
+                    <span className="ml-2">{riskAssessment.timeframe}</span>
+                  </div>
+                  <div>
+                    <strong>Probability:</strong>
+                    <span className="ml-2">{riskAssessment.probability}</span>
+                  </div>
+                  <div>
+                    <strong>Action:</strong>
+                    <span className="ml-2">{riskAssessment.action}</span>
+                  </div>
+                </div>
+              )}
+              <p className="text-sm mt-2">
+                <strong>Current Reading:</strong> {stats.latest} NTU - {stats.latest < thresholds.normal ? 'Clear Water' : 'Turbid Water'}
+              </p>
             </div>
           </div>
         </div>
 
-        <h1 className="text-3xl font-bold text-gray-800 mb-8">Real-time Flood Monitoring Dashboard</h1>
+        <h1 className="text-3xl font-bold text-gray-800 mb-8">Real-time Turbidity Monitoring Dashboard</h1>
         
         {error && (
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
@@ -363,16 +443,45 @@ const Dashboard = () => {
           </div>
         )}
 
+        {/* Threshold Reference Card */}
+        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <h2 className="text-lg font-semibold text-gray-700 mb-4">Turbidity Threshold Reference</h2>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
+            <div className="bg-green-50 p-3 rounded">
+              <strong>Normal:</strong> 0-{thresholds.normal} NTU<br/>
+              <span className="text-green-600">Clear water conditions</span>
+            </div>
+            <div className="bg-yellow-50 p-3 rounded">
+              <strong>Warning:</strong> {thresholds.normal}-{thresholds.warning} NTU<br/>
+              <span className="text-yellow-600">Slight turbidity</span>
+            </div>
+            <div className="bg-orange-50 p-3 rounded">
+              <strong>Danger:</strong> {thresholds.warning}-{thresholds.danger} NTU<br/>
+              <span className="text-orange-600">Moderate turbidity</span>
+            </div>
+            <div className="bg-red-50 p-3 rounded">
+              <strong>Critical:</strong> {thresholds.danger}+ NTU<br/>
+              <span className="text-red-600">High turbidity</span>
+            </div>
+          </div>
+        </div>
+
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           {/* Alert Level Card */}
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-lg font-semibold text-gray-700 mb-2">Alert Level</h2>
+            <h2 className="text-lg font-semibold text-gray-700 mb-2">Water Condition</h2>
             <div className="text-center">
               <span className={`text-3xl font-bold ${getStatusColor(stats.latest)}`}>
                 {alertLevel.toUpperCase()}
               </span>
               <p className="text-sm text-gray-500 mt-2">{alertConfig.message}</p>
+              {riskAssessment && (
+                <div className="mt-3 p-2 bg-gray-100 rounded">
+                  <div className="text-xs font-semibold">Flood Probability</div>
+                  <div className="text-lg font-bold">{riskAssessment.probability}</div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -386,6 +495,12 @@ const Dashboard = () => {
               </span>
             </div>
             <p className="text-sm text-gray-500 mt-2">Trend: {getTrendIcon(stats.trend)} {stats.trend}</p>
+            <div className="mt-3 text-xs">
+              <div className="flex justify-between">
+                <span>Clear: &lt;{thresholds.normal} NTU</span>
+                <span>Turbid: &gt;{thresholds.danger} NTU</span>
+              </div>
+            </div>
           </div>
 
           {/* Average Value Card */}
@@ -398,6 +513,11 @@ const Dashboard = () => {
               </span>
             </div>
             <p className="text-sm text-gray-500 mt-2">{turbidityData.length} reading average</p>
+            {riskAssessment && (
+              <div className="mt-2 text-xs text-gray-600">
+                Expected impact: {riskAssessment.consequences}
+              </div>
+            )}
           </div>
 
           {/* Highest Value Card */}
@@ -410,12 +530,17 @@ const Dashboard = () => {
               </span>
             </div>
             <p className="text-sm text-gray-500 mt-2">Historical maximum</p>
+            {riskAssessment && (
+              <div className="mt-2 text-xs text-gray-600">
+                Timeframe: {riskAssessment.timeframe}
+              </div>
+            )}
           </div>
         </div>
 
         {/* Chart Section */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-xl font-semibold text-gray-700 mb-6">Sediment Monitoring Timeline</h2>
+          <h2 className="text-xl font-semibold text-gray-700 mb-6">Turbidity Monitoring Timeline</h2>
           {turbidityData.length > 0 ? (
             <div className="h-96">
               <ResponsiveContainer width="100%" height="100%">
@@ -467,7 +592,7 @@ const Dashboard = () => {
             <div className="h-96 flex items-center justify-center bg-gray-100 rounded-lg">
               <div className="text-center text-gray-500">
                 <p className="text-lg mb-2">📊 No data available</p>
-                <p className="text-sm">Waiting for sediment monitoring data...</p>
+                <p className="text-sm">Waiting for turbidity monitoring data...</p>
               </div>
             </div>
           )}
