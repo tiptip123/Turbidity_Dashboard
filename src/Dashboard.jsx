@@ -1,29 +1,37 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
+  BarChart, Bar
+} from 'recharts';
 
 const Dashboard = () => {
+  // core data + ui
   const [turbidityData, setTurbidityData] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState({
-    latest: 0,
-    average: 0,
-    highest: 0,
-    trend: 'stable'
+const [loading, setLoading] = useState(true);
+const [stats, setStats] = useState({ latest: 0, average: 0, highest: 0, trend: 'stable' });
+const [error, setError] = useState(null);
+const [alertLevel, setAlertLevel] = useState('normal');
+const [lastUpdate, setLastUpdate] = useState(new Date());
+const [isLive, setIsLive] = useState(false);
+const [newDataAlert, setNewDataAlert] = useState(false);
+const [riskAssessment, setRiskAssessment] = useState(null);
+
+  // sediment analytics
+  const [accumulationRate, setAccumulationRate] = useState(0); // NTU/hour
+  const [daysToClog, setDaysToClog] = useState(null); // days estimate
+  const [stabilityIndex, setStabilityIndex] = useState(100); // 0-100
+  const [distribution, setDistribution] = useState({
+    normal: 0, warning: 0, danger: 0, critical: 0
   });
-  const [error, setError] = useState(null);
-  const [alertLevel, setAlertLevel] = useState('normal');
-  const [lastUpdate, setLastUpdate] = useState(new Date());
-  const [isLive, setIsLive] = useState(true);
-  const [newDataAlert, setNewDataAlert] = useState(false);
-  const [riskAssessment, setRiskAssessment] = useState(null);
-  
+
+  const [timeRange, setTimeRange] = useState('today'); // 'today' | 'week' | 'month'
+
   const lastDataId = useRef(0);
   const chartDataRef = useRef([]);
   const statsRef = useRef(stats);
   const turbidityDataRef = useRef(turbidityData);
 
-  // Update refs when state changes
   useEffect(() => {
     statsRef.current = stats;
     turbidityDataRef.current = turbidityData;
@@ -31,13 +39,13 @@ const Dashboard = () => {
 
   // REAL-WORLD DRAINAGE WATER TURBIDITY THRESHOLDS
   const thresholds = {
-    normal: 100,       // Clear water: 0-100 NTU (normal flow)
-    warning: 500,      // Moderate sediment: 100-500 NTU (monitor)
-    danger: 1000,      // High sediment: 500-1000 NTU (clogging risk)
-    critical: 1500     // Extreme sediment: 1000+ NTU (immediate clog risk)
+    normal: 100,    // Clear water
+    warning: 500,   // Moderate sediment
+    danger: 1000,   // High sediment
+    critical: 1500  // Extreme sediment
   };
 
-  // REALISTIC risk prediction for drainage systems
+  // Risk prediction (keeps your existing messaging)
   const predictCloggingRisk = (latest, average, trend, currentAlertLevel) => {
     if (currentAlertLevel === 'critical' || latest >= thresholds.critical) {
       return {
@@ -73,35 +81,55 @@ const Dashboard = () => {
     };
   };
 
-  // SENSOR CALIBRATION CHECK
+  // calibration check (logs to console; also shows UI notice when avg too high)
   const checkSensorCalibration = (readings) => {
+    if (!readings || readings.length === 0) return;
     const avgReading = readings.reduce((sum, val) => sum + val.value, 0) / readings.length;
-    
     if (avgReading > 2000) {
-      console.warn('⚠️ SENSOR CALIBRATION WARNING:');
-      console.warn(`Current average: ${avgReading} NTU in clear water`);
-      console.warn('Expected: 0-100 NTU for clear water');
-      console.warn('Sensor may need recalibration or has inverse output');
+      console.warn('⚠️ SENSOR CALIBRATION WARNING: avg:', avgReading);
     }
   };
 
-  // QUICK FIX: INVERT THE READINGS
+  // quick inversion if sensor returns inverse mapping
   const invertIfNeeded = (value) => {
-    // If clear water gives 2400+ NTU, invert the scale
-    const SENSOR_MAX = 3000; // Adjust based on your sensor specs
+    const SENSOR_MAX = 3000;
+    // If it's clearly inverted in practice, this line flips it.
     return SENSOR_MAX - value;
   };
 
+  // Build a Supabase date filter based on the timeRange
+  const buildDateFilter = () => {
+    const now = new Date();
+    if (timeRange === 'today') {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0).toISOString();
+      return (query) => query.gte('created_at', start);
+    }
+    if (timeRange === 'week') {
+      const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      return (query) => query.gte('created_at', start);
+    }
+    // month
+    const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    return (query) => query.gte('created_at', start);
+  };
+
+  // fetch data (with time filter)
   const fetchTurbidityData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
 
-      const { data, error: supabaseError } = await supabase
+      let query = supabase
         .from('turbidity_readings')
         .select('id, value, created_at')
         .order('created_at', { ascending: false })
-        .limit(100);
+        .limit(1000); // fetch up to 1000 for range aggregation
+
+      // apply date filter
+      const applyFilter = buildDateFilter();
+      query = applyFilter(query);
+
+      const { data, error: supabaseError } = await query;
 
       if (supabaseError) {
         console.error('Supabase error:', supabaseError);
@@ -110,45 +138,39 @@ const Dashboard = () => {
       }
 
       if (data && data.length > 0) {
-        // Check sensor calibration
         checkSensorCalibration(data);
-        
-        // Store the latest ID for change detection
         lastDataId.current = data[0].id;
         processTurbidityData(data);
         setLastUpdate(new Date());
         setError(null);
       } else {
-        setError('No data found in turbidity_readings table');
+        setTurbidityData([]);
+        setError('No data found in turbidity_readings table for selected range');
       }
-    } catch (error) {
-      console.error('Error:', error);
+    } catch (err) {
+      console.error('Error:', err);
       setError('An unexpected error occurred');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [timeRange]);
 
   useEffect(() => {
     fetchTurbidityData();
-    
+
     const intervalId = setInterval(() => {
-      if (isLive) {
-        checkForNewData();
-      }
+      if (isLive) checkForNewData();
     }, 10000);
 
-    return () => {
-      clearInterval(intervalId);
-    };
+    return () => clearInterval(intervalId);
   }, [isLive, fetchTurbidityData]);
 
-  // Check for new data without full refresh
+  // check for newest row
   const checkForNewData = async () => {
     try {
       const { data, error } = await supabase
         .from('turbidity_readings')
-        .select('id, value, created_at')
+        .select('id')
         .order('id', { ascending: false })
         .limit(1);
 
@@ -159,17 +181,14 @@ const Dashboard = () => {
 
       if (data && data.length > 0) {
         const latestId = data[0].id;
-        
-        if (latestId > lastDataId.current) {
-          fetchNewData(lastDataId.current);
-        }
+        if (latestId > lastDataId.current) fetchNewData(lastDataId.current);
       }
-    } catch (error) {
-      console.error('Error in data check:', error);
+    } catch (err) {
+      console.error('Error in data check:', err);
     }
   };
 
-  // Fetch only new data since last known ID
+  // fetch only new rows since last id
   const fetchNewData = async (sinceId) => {
     try {
       const { data, error } = await supabase
@@ -186,7 +205,7 @@ const Dashboard = () => {
       if (data && data.length > 0) {
         const newDataPoints = data.map(item => ({
           time: new Date(item.created_at).toLocaleTimeString(),
-          value: invertIfNeeded(item.value), // Apply inversion to new data
+          value: invertIfNeeded(item.value),
           fullDate: new Date(item.created_at),
           date: new Date(item.created_at).toLocaleDateString(),
           id: item.id,
@@ -194,101 +213,147 @@ const Dashboard = () => {
         }));
 
         lastDataId.current = data[data.length - 1].id;
-        
-        const updatedData = [...turbidityDataRef.current, ...newDataPoints];
-        if (updatedData.length > 100) {
-          updatedData.splice(0, updatedData.length - 100);
-        }
-        
+        const updatedData = [...turbidityDataRef.current, ...newDataPoints].slice(-1000);
         setTurbidityData(updatedData);
         chartDataRef.current = updatedData;
         updateStatsIncrementally(updatedData);
-        
         setNewDataAlert(true);
         setLastUpdate(new Date());
-        
-        setTimeout(() => {
-          setNewDataAlert(false);
-        }, 5000);
+        setTimeout(() => setNewDataAlert(false), 4000);
       }
-    } catch (error) {
-      console.error('Error processing new data:', error);
+    } catch (err) {
+      console.error('Error fetching new rows:', err);
     }
   };
 
-  // SINGLE processTurbidityData function with inversion
+  // main process function — transforms and calculates analytics
   const processTurbidityData = (data) => {
-    const formattedData = data.map(item => ({
-      time: new Date(item.created_at).toLocaleTimeString(),
-      value: invertIfNeeded(item.value), // APPLY INVERSION HERE
-      fullDate: new Date(item.created_at),
-      date: new Date(item.created_at).toLocaleDateString(),
-      id: item.id,
-      originalValue: item.value // Keep original for debugging
-    })).reverse();
+    // map + invert + reverse (so chronological ascending)
+    const formatted = data
+      .map(item => ({
+        time: new Date(item.created_at).toLocaleTimeString(),
+        value: invertIfNeeded(item.value),
+        fullDate: new Date(item.created_at),
+        date: new Date(item.created_at).toLocaleDateString(),
+        id: item.id,
+        originalValue: item.value
+      }))
+      .reverse();
 
-    const values = formattedData.map(item => item.value);
-    const latest = values[0];
-    const average = values.reduce((sum, val) => sum + val, 0) / values.length;
-    const highest = Math.max(...values);
-    const trend = calculateTrend(values.slice(0, 10));
+    // compute stats
+    const values = formatted.map(d => Number(d.value) || 0);
+    const latest = values.length ? values[values.length - 1] : 0;
+    const average = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+    const highest = values.length ? Math.max(...values) : 0;
+    const trend = calculateTrend(values.slice(-10));
     const alert = determineAlertLevel(latest, average, trend);
-    
     const risk = predictCloggingRisk(latest, average, trend, alert);
-    setRiskAssessment(risk);
 
-    setTurbidityData(formattedData);
-    chartDataRef.current = formattedData;
-    setStats({ 
-      latest, 
-      average: Math.round(average), 
-      highest,
-      trend
-    });
+    // accumulation analytics
+    computeAccumulationMetrics(formatted);
+
+    // distribution
+    computeDistribution(values);
+
+    setTurbidityData(formatted.slice(-1000));
+    chartDataRef.current = formatted.slice(-1000);
+    setStats({ latest, average: Math.round(average), highest, trend });
     setAlertLevel(alert);
+    setRiskAssessment(risk);
   };
 
-  // Update statistics incrementally
+  // incremental update for small inserts
   const updateStatsIncrementally = (data) => {
-    if (data.length === 0) return;
-    
-    const values = data.map(item => item.value);
+    if (!data || data.length === 0) return;
+    const values = data.map(d => Number(d.value) || 0);
     const latest = values[values.length - 1];
-    const highest = Math.max(statsRef.current.highest, latest);
-    
-    const newAverage = (statsRef.current.average * turbidityDataRef.current.length + latest) / (turbidityDataRef.current.length + 1);
-    
-    const recentValues = values.slice(-10);
-    const trend = calculateTrend(recentValues);
-    
-    const alert = determineAlertLevel(latest, newAverage, trend);
-    const risk = predictCloggingRisk(latest, newAverage, trend, alert);
-    setRiskAssessment(risk);
+    const avg = values.reduce((a, b) => a + b, 0) / values.length;
+    const highest = Math.max(...values);
+    const trend = calculateTrend(values.slice(-10));
+    const alert = determineAlertLevel(latest, avg, trend);
+    const risk = predictCloggingRisk(latest, avg, trend, alert);
 
-    setStats({ 
-      latest, 
-      average: Math.round(newAverage), 
-      highest,
-      trend
-    });
+    computeAccumulationMetrics(data);
+    computeDistribution(values);
+
+    setStats({ latest, average: Math.round(avg), highest, trend });
     setAlertLevel(alert);
+    setRiskAssessment(risk);
+  };
+
+  // accumulation metrics: rate, days to clog, stability
+  const computeAccumulationMetrics = (formatted) => {
+    // need at least two points
+    if (!formatted || formatted.length < 2) {
+      setAccumulationRate(0);
+      setDaysToClog(null);
+      setStabilityIndex(100);
+      return;
+    }
+
+    // compute slope over last N points (e.g., last 6)
+    const N = Math.min(6, formatted.length - 1);
+    let totalRate = 0;
+    let used = 0;
+    for (let i = formatted.length - N; i < formatted.length; i++) {
+      const cur = formatted[i];
+      const prev = formatted[i - 1];
+      if (!prev) continue;
+      const dtHours = (cur.fullDate - prev.fullDate) / 3600000;
+      if (dtHours <= 0) continue;
+      const dntu = (cur.value - prev.value);
+      const rate = dntu / dtHours; // NTU per hour
+      totalRate += rate;
+      used++;
+    }
+
+    const avgRate = used ? totalRate / used : 0; // NTU/hour (can be negative)
+    setAccumulationRate(Number(avgRate.toFixed(2)));
+
+    // predict days to critical (only if trending upwards)
+    const current = formatted[formatted.length - 1].value;
+    if (avgRate > 0) {
+      const ntuLeft = thresholds.critical - current;
+      const hoursToClog = ntuLeft > 0 ? (ntuLeft / avgRate) : 0;
+      setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
+    } else {
+      setDaysToClog(null);
+    }
+
+    // stability index: 100 - (relative std-like fraction)
+    // approximate: stability = 100 - clamp(|avgRate| / critical * 100)
+    const stability = Math.max(0, 100 - Math.min(100, Math.abs(avgRate) / thresholds.critical * 100));
+    setStabilityIndex(Math.round(stability));
+  };
+
+  // distribution histogram counts
+  const computeDistribution = (values) => {
+    const bins = { normal: 0, warning: 0, danger: 0, critical: 0 };
+    if (!values || values.length === 0) {
+      setDistribution(bins);
+      return;
+    }
+    values.forEach(v => {
+      if (v < thresholds.normal) bins.normal++;
+      else if (v < thresholds.warning) bins.warning++;
+      else if (v < thresholds.danger) bins.danger++;
+      else bins.critical++;
+    });
+    setDistribution(bins);
   };
 
   const calculateTrend = (values) => {
-    if (values.length < 2) return 'stable';
-    
-    const firstHalf = values.slice(0, Math.floor(values.length / 2));
-    const secondHalf = values.slice(Math.floor(values.length / 2));
-    
-    const avgFirst = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
-    const avgSecond = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
-    
-    if (avgSecond > avgFirst * 1.1) return 'rising';
-    if (avgSecond < avgFirst * 0.9) return 'falling';
+    if (!values || values.length < 2) return 'stable';
+    const mid = Math.floor(values.length / 2);
+    const first = values.slice(0, mid);
+    const second = values.slice(mid);
+    const avg1 = first.reduce((a, b) => a + b, 0) / first.length;
+    const avg2 = second.reduce((a, b) => a + b, 0) / second.length;
+    if (avg2 > avg1 * 1.1) return 'rising';
+    if (avg2 < avg1 * 0.9) return 'falling';
     return 'stable';
   };
 
-  // CORRECTED: Reversed alert level determination
   const determineAlertLevel = (latest, average, trend) => {
     if (latest >= thresholds.critical || average >= thresholds.critical) {
       return 'critical';
@@ -302,79 +367,61 @@ const Dashboard = () => {
     return 'normal';
   };
 
+  // small helpers
   const getAlertConfig = (level) => {
     const configs = {
-      normal: { 
-        color: 'green', 
-        icon: '✅', 
-        message: 'Clear water - Normal conditions',
-        bgColor: 'bg-green-100',
-        borderColor: 'border-green-400',
-        textColor: 'text-green-800'
-      },
-      warning: { 
-        color: 'yellow', 
-        icon: '⚠️', 
-        message: 'Slight turbidity - Monitor closely',
-        bgColor: 'bg-yellow-100',
-        borderColor: 'border-yellow-400',
-        textColor: 'text-yellow-800'
-      },
-      danger: { 
-        color: 'orange', 
-        icon: '🚨', 
-        message: 'Moderate turbidity - Flood risk increasing',
-        bgColor: 'bg-orange-100',
-        borderColor: 'border-orange-400',
-        textColor: 'text-orange-800'
-      },
-      critical: { 
-        color: 'red', 
-        icon: '🔥', 
-        message: 'High turbidity - Immediate action required',
-        bgColor: 'bg-red-100',
-        borderColor: 'border-red-400',
-        textColor: 'text-red-800'
-      }
+      normal: { color: 'green', icon: '✅', message: 'Clear water - Normal conditions', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
+      warning: { color: 'yellow', icon: '⚠️', message: 'Slight turbidity - Monitor closely', bgColor: 'bg-yellow-100', borderColor: 'border-yellow-400', textColor: 'text-yellow-800' },
+      danger: { color: 'orange', icon: '🚨', message: 'Moderate turbidity - Flood risk increasing', bgColor: 'bg-orange-100', borderColor: 'border-orange-400', textColor: 'text-orange-800' },
+      critical: { color: 'red', icon: '🔥', message: 'High turbidity - Immediate action required', bgColor: 'bg-red-100', borderColor: 'border-red-400', textColor: 'text-red-800' }
     };
     return configs[level] || configs.normal;
   };
 
-  const getStatus = (value) => {
-    if (value >= thresholds.critical) return '🔥 Critical Turbidity';
-    if (value >= thresholds.danger) return '🚨 High Turbidity';
-    if (value >= thresholds.warning) return '⚠️ Moderate Turbidity';
+  const getStatus = (v) => {
+    if (v >= thresholds.critical) return '🔥 Critical Turbidity';
+    if (v >= thresholds.danger) return '🚨 High Turbidity';
+    if (v >= thresholds.warning) return '⚠️ Moderate Turbidity';
     return '✅ Clear Water';
   };
 
-  const getStatusColor = (value) => {
-    if (value >= thresholds.critical) return 'text-red-700';
-    if (value >= thresholds.danger) return 'text-orange-600';
-    if (value >= thresholds.warning) return 'text-yellow-600';
+  const getStatusColor = (v) => {
+    if (v >= thresholds.critical) return 'text-red-700';
+    if (v >= thresholds.danger) return 'text-orange-600';
+    if (v >= thresholds.warning) return 'text-yellow-600';
     return 'text-green-600';
   };
 
-  const getTrendIcon = (trend) => {
-    return trend === 'rising' ? '📈' : trend === 'falling' ? '📉' : '➡️';
-  };
+  const getTrendIcon = (trend) => (trend === 'rising' ? '📈' : trend === 'falling' ? '📉' : '➡️');
 
-  const getRiskColor = (riskLevel) => {
-    switch (riskLevel) {
-      case 'EXTREME': return 'text-red-700 bg-red-100';
-      case 'HIGH': return 'text-orange-700 bg-orange-100';
-      case 'MODERATE': return 'text-yellow-700 bg-yellow-100';
-      default: return 'text-green-700 bg-green-100';
+  const toggleLiveUpdates = () => setIsLive(!isLive);
+
+  // build AI-like insight summary
+  const buildInsight = () => {
+    if (!turbidityData || turbidityData.length < 2) return 'Waiting for more data to generate insights.';
+    const rate = accumulationRate;
+    if (rate >= thresholds.critical * 0.1) {
+      return `Sediment accumulation is rising quickly (~${rate} NTU/hr). High clogging risk — ${riskAssessment?.probability || ''}. ${daysToClog ? `Estimated clogging in ${daysToClog} days.` : ''}`;
     }
+    if (rate > 0) {
+      return `Sediment slowly increasing (~${rate} NTU/hr). Monitor the drains; stability index ${stabilityIndex}%.`;
+    }
+    if (rate < 0) {
+      return `Sediment levels decreasing (cleaning/flush effect). Stability index ${stabilityIndex}%.`;
+    }
+    return `Stable sediment levels. Stability index ${stabilityIndex}%.`;
   };
 
-  const toggleLiveUpdates = () => {
-    setIsLive(!isLive);
+  // UI handlers
+  const onTimeRangeChange = (range) => {
+    setTimeRange(range);
   };
 
+  // small loading state
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">Loading real-time flood monitoring data...</div>
+        <div className="text-xl text-gray-600">Loading real-time sediment analytics...</div>
       </div>
     );
   }
@@ -384,7 +431,7 @@ const Dashboard = () => {
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
-        {/* Sensor Calibration Warning */}
+        {/* Sensor Calibration Notice */}
         {stats.latest > 2000 && (
           <div className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg mb-4">
             <div className="flex items-center">
@@ -392,269 +439,194 @@ const Dashboard = () => {
               <div>
                 <strong>Sensor Calibration Notice:</strong>
                 <p className="text-sm">
-                  Current reading: {stats.latest} NTU in clear water. 
-                  Expected: 0-100 NTU. Sensor may need calibration.
+                  Current sensor average is high — check sensor wiring/calibration.
                 </p>
               </div>
             </div>
           </div>
         )}
 
-        {/* Real-time Status Bar */}
-        <div className="bg-blue-100 border border-blue-400 text-blue-800 px-4 py-2 rounded-lg mb-4 flex justify-between items-center">
-          <div className="flex items-center">
-            <span className="text-xl mr-2">{isLive ? '🔄' : '⏸️'}</span>
-            <span>
-              {isLive ? 'Live monitoring active' : 'Updates paused'} 
-              <span className="text-sm ml-2">
-                Last update: {lastUpdate.toLocaleTimeString()}
-              </span>
-            </span>
+        {/* Status bar + time range */}
+        <div className="bg-white border px-4 py-3 rounded-lg mb-4 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="text-xl">{isLive ? '🔄' : '⏸️'}</div>
+            <div>
+              <div className="font-medium">{isLive ? 'Live monitoring active' : 'Updates paused'}</div>
+              <div className="text-xs text-gray-500">Last update: {lastUpdate.toLocaleString()}</div>
+            </div>
           </div>
-          <div className="flex items-center space-x-2">
-            {/* Debug info */}
-            <span className="text-xs bg-gray-200 px-2 py-1 rounded">
-              Raw: {turbidityData[0]?.originalValue || stats.latest} NTU
-            </span>
-            <button
-              onClick={toggleLiveUpdates}
-              className={`px-3 py-1 rounded text-sm ${
-                isLive ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'
-              } text-white`}
-            >
+
+          <div className="flex items-center space-x-3">
+            <div className="text-xs text-gray-600 mr-2">Range:</div>
+            <div className="flex space-x-2">
+              <button onClick={() => onTimeRangeChange('today')} className={`px-3 py-1 rounded ${timeRange === 'today' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Today</button>
+              <button onClick={() => onTimeRangeChange('week')} className={`px-3 py-1 rounded ${timeRange === 'week' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Week</button>
+              <button onClick={() => onTimeRangeChange('month')} className={`px-3 py-1 rounded ${timeRange === 'month' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Month</button>
+            </div>
+
+            <div className="text-xs bg-gray-200 px-2 py-1 rounded">Raw: {turbidityData[turbidityData.length - 1]?.originalValue ?? stats.latest} </div>
+
+            <button onClick={toggleLiveUpdates} className={`px-3 py-1 rounded ${isLive ? 'bg-red-500 text-white' : 'bg-green-500 text-white'}`}>
               {isLive ? 'Pause' : 'Resume'}
             </button>
           </div>
         </div>
 
-        {/* New Data Alert */}
-        {newDataAlert && (
-          <div className="bg-green-100 border border-green-400 text-green-800 px-4 py-3 rounded-lg mb-4 flex justify-between items-center">
-            <div className="flex items-center">
-              <span className="text-lg mr-2">📊</span>
-              <span>New data received and processed</span>
-            </div>
-            <button
-              onClick={() => setNewDataAlert(false)}
-              className="text-green-800 hover:text-green-600 text-lg"
-            >
-              &times;
-            </button>
-          </div>
-        )}
-
-        {/* Alert Banner */}
+        {/* Alert banner */}
         <div className={`${alertConfig.bgColor} border ${alertConfig.borderColor} ${alertConfig.textColor} px-6 py-4 rounded-lg mb-6`}>
           <div className="flex items-start">
             <span className="text-2xl mr-3 mt-1">{alertConfig.icon}</span>
             <div className="flex-1">
               <h2 className="text-xl font-bold">Turbidity Alert: {alertConfig.message}</h2>
-              {riskAssessment && (
-                <div className="mt-2 grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
-                  <div>
-                    <strong>Risk Level:</strong>
-                    <span className={`ml-2 px-2 py-1 rounded ${getRiskColor(riskAssessment.risk)}`}>
-                      {riskAssessment.risk}
-                    </span>
-                  </div>
-                  <div>
-                    <strong>Timeframe:</strong>
-                    <span className="ml-2">{riskAssessment.timeframe}</span>
-                  </div>
-                  <div>
-                    <strong>Probability:</strong>
-                    <span className="ml-2">{riskAssessment.probability}</span>
-                  </div>
-                  <div>
-                    <strong>Action:</strong>
-                    <span className="ml-2">{riskAssessment.action}</span>
-                  </div>
-                </div>
-              )}
+              <div className="mt-2 grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
+                <div><strong>Risk Level:</strong> <span className="ml-2 font-semibold">{riskAssessment?.risk ?? 'N/A'}</span></div>
+                <div><strong>Timeframe:</strong> <span className="ml-2">{riskAssessment?.timeframe ?? 'N/A'}</span></div>
+                <div><strong>Probability:</strong> <span className="ml-2">{riskAssessment?.probability ?? 'N/A'}</span></div>
+                <div><strong>Action:</strong> <span className="ml-2">{riskAssessment?.action ?? 'N/A'}</span></div>
+              </div>
+
               <p className="text-sm mt-2">
-                <strong>Current Reading:</strong> {stats.latest} NTU - {stats.latest < thresholds.normal ? 'Clear Water' : 'Turbid Water'}
+                <strong>Current Reading:</strong> {stats.latest} NTU — {stats.latest < thresholds.normal ? 'Clear Water' : 'Turbid Water'}
               </p>
             </div>
           </div>
         </div>
 
-        <h1 className="text-3xl font-bold text-gray-800 mb-8">Real-time Turbidity Monitoring Dashboard</h1>
-        
-        {error && (
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
-            <p className="font-semibold">Error:</p>
-            <p>{error}</p>
-          </div>
-        )}
+        <h1 className="text-3xl font-semibold text-gray-800 mb-6">Sediment & Turbidity Dashboard</h1>
 
-        {/* Threshold Reference Card */}
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-lg font-semibold text-gray-700 mb-4">Drainage Water Turbidity Guide</h2>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
-            <div className="bg-green-50 p-3 rounded border-l-4 border-green-400">
-              <strong>Normal: 0-{thresholds.normal} NTU</strong><br/>
-              <span className="text-green-600">Clear water - Normal flow</span>
-              <p className="text-xs mt-1">• No clogging risk<br/>• Routine monitoring</p>
-            </div>
-            <div className="bg-yellow-50 p-3 rounded border-l-4 border-yellow-400">
-              <strong>Warning: {thresholds.normal}-{thresholds.warning} NTU</strong><br/>
-              <span className="text-yellow-600">Moderate sediment</span>
-              <p className="text-xs mt-1">• Minor buildup possible<br/>• Increase monitoring</p>
-            </div>
-            <div className="bg-orange-50 p-3 rounded border-l-4 border-orange-400">
-              <strong>Danger: {thresholds.warning}-{thresholds.danger} NTU</strong><br/>
-              <span className="text-orange-600">High sediment</span>
-              <p className="text-xs mt-1">• Clogging likely<br/>• Schedule cleaning</p>
-            </div>
-            <div className="bg-red-50 p-3 rounded border-l-4 border-red-400">
-              <strong>Critical: {thresholds.danger}+ NTU</strong><br/>
-              <span className="text-red-600">Extreme sediment</span>
-              <p className="text-xs mt-1">• Immediate clog risk<br/>• Emergency response</p>
-            </div>
+        {/* Main Stats */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+          <div className="bg-white p-5 rounded shadow">
+            <div className="text-sm font-semibold text-gray-600">Latest</div>
+            <div className={`text-2xl font-bold ${getStatusColor(stats.latest)}`}>{stats.latest} NTU</div>
+            <div className="text-xs text-gray-500 mt-1">{getStatus(stats.latest)}</div>
+          </div>
+
+          <div className="bg-white p-5 rounded shadow">
+            <div className="text-sm font-semibold text-gray-600">Average</div>
+            <div className="text-2xl font-bold text-blue-600">{stats.average} NTU</div>
+            <div className="text-xs text-gray-500 mt-1">{turbidityData.length} readings</div>
+          </div>
+
+          <div className="bg-white p-5 rounded shadow">
+            <div className="text-sm font-semibold text-gray-600">Peak</div>
+            <div className="text-2xl font-bold text-purple-600">{stats.highest} NTU</div>
+            <div className="text-xs text-gray-500 mt-1">Historical max</div>
+          </div>
+
+          <div className="bg-white p-5 rounded shadow">
+            <div className="text-sm font-semibold text-gray-600">Trend</div>
+            <div className="text-2xl font-bold">{getTrendIcon(stats.trend)}</div>
+            <div className="text-xs text-gray-500 mt-1">{stats.trend}</div>
           </div>
         </div>
 
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          {/* Alert Level Card */}
+        {/* Sediment Analytics Panel */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-lg font-semibold text-gray-700 mb-2">Water Condition</h2>
-            <div className="text-center">
-              <span className={`text-3xl font-bold ${getStatusColor(stats.latest)}`}>
-                {alertLevel.toUpperCase()}
-              </span>
-              <p className="text-sm text-gray-500 mt-2">{alertConfig.message}</p>
-              {riskAssessment && (
-                <div className="mt-3 p-2 bg-gray-100 rounded">
-                  <div className="text-xs font-semibold">Flood Probability</div>
-                  <div className="text-lg font-bold">{riskAssessment.probability}</div>
-                </div>
-              )}
-            </div>
+            <h3 className="font-semibold text-gray-700 mb-2">Accumulation Rate</h3>
+            <div className="text-3xl font-bold text-indigo-600">{accumulationRate} NTU/hr</div>
+            <div className="text-xs text-gray-500 mt-1">Recent average rate (positive = increasing)</div>
           </div>
 
-          {/* Latest Value Card */}
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-lg font-semibold text-gray-700 mb-2">Current Turbidity</h2>
-            <div className="flex items-baseline justify-between">
-              <span className="text-3xl font-bold text-blue-600">{stats.latest} NTU</span>
-              <span className={`text-sm font-medium ${getStatusColor(stats.latest)}`}>
-                {getStatus(stats.latest)}
-              </span>
-            </div>
-            <p className="text-sm text-gray-500 mt-2">Trend: {getTrendIcon(stats.trend)} {stats.trend}</p>
-            <div className="mt-3 text-xs">
-              <div className="flex justify-between">
-                <span>Clear: &lt;{thresholds.normal} NTU</span>
-                <span>Turbid: &gt;{thresholds.danger} NTU</span>
-              </div>
-            </div>
+            <h3 className="font-semibold text-gray-700 mb-2">Days to Clog (est.)</h3>
+            <div className="text-3xl font-bold text-red-600">{daysToClog !== null ? `${daysToClog} days` : 'Stable'}</div>
+            <div className="text-xs text-gray-500 mt-1">Estimate based on current rate & critical threshold</div>
           </div>
 
-          {/* Average Value Card */}
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-lg font-semibold text-gray-700 mb-2">Average Turbidity</h2>
-            <div className="flex items-baseline justify-between">
-              <span className="text-3xl font-bold text-purple-600">{stats.average} NTU</span>
-              <span className={`text-sm font-medium ${getStatusColor(stats.average)}`}>
-                {getStatus(stats.average)}
-              </span>
+            <h3 className="font-semibold text-gray-700 mb-2">Stability Index</h3>
+            <div className={`text-3xl font-bold ${stabilityIndex > 70 ? 'text-green-600' : stabilityIndex > 40 ? 'text-yellow-600' : 'text-red-600'}`}>
+              {stabilityIndex}%
             </div>
-            <p className="text-sm text-gray-500 mt-2">{turbidityData.length} reading average</p>
-            {riskAssessment && (
-              <div className="mt-2 text-xs text-gray-600">
-                Expected impact: {riskAssessment.consequences}
+            <div className="text-xs text-gray-500 mt-1">Higher = more stable (less sudden accumulation)</div>
+          </div>
+        </div>
+
+        {/* Insight */}
+        <div className="bg-white rounded-lg shadow p-5 mb-6">
+          <h3 className="font-semibold text-gray-700 mb-2">Insight</h3>
+          <p className="text-sm text-gray-700">{buildInsight()}</p>
+        </div>
+
+        {/* Charts: Turbidity timeline + Accumulation rate + Distribution */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          {/* Timeline */}
+          <div className="bg-white p-6 rounded shadow">
+            <h3 className="text-lg font-semibold mb-4">Turbidity Monitoring Timeline</h3>
+            {turbidityData.length > 0 ? (
+              <div style={{ width: '100%', height: 360 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={turbidityData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="time" minTickGap={20} />
+                    <YAxis label={{ value: 'NTU', angle: -90, position: 'insideLeft' }} />
+                    <ReferenceLine y={thresholds.normal} stroke="green" label="Normal" />
+                    <ReferenceLine y={thresholds.warning} stroke="orange" label="Warning" />
+                    <ReferenceLine y={thresholds.danger} stroke="red" label="Danger" />
+                    <ReferenceLine y={thresholds.critical} stroke="darkred" label="Critical" />
+                    <Tooltip formatter={(v) => `${v} NTU`} labelFormatter={(label, payload) => (payload && payload[0] ? payload[0].payload.fullDate.toLocaleString() : label)} />
+                    <Line type="monotone" dataKey="value" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 6 }} />
+                  </LineChart>
+                </ResponsiveContainer>
               </div>
+            ) : (
+              <div className="h-64 flex items-center justify-center text-gray-500">No data available</div>
             )}
           </div>
 
-          {/* Highest Value Card */}
-          <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-lg font-semibold text-gray-700 mb-2">Peak Turbidity</h2>
-            <div className="flex items-baseline justify-between">
-              <span className="text-3xl font-bold text-red-600">{stats.highest} NTU</span>
-              <span className={`text-sm font-medium ${getStatusColor(stats.highest)}`}>
-                {getStatus(stats.highest)}
-              </span>
-            </div>
-            <p className="text-sm text-gray-500 mt-2">Historical maximum</p>
-            {riskAssessment && (
-              <div className="mt-2 text-xs text-gray-600">
-                Timeframe: {riskAssessment.timeframe}
+          {/* Distribution & accumulation */}
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded shadow">
+              <h3 className="text-lg font-semibold mb-4">Sediment Distribution</h3>
+              <div style={{ width: '100%', height: 240 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={[
+                    { name: '0-99', count: distribution.normal },
+                    { name: '100-499', count: distribution.warning },
+                    { name: '500-999', count: distribution.danger },
+                    { name: '1000+', count: distribution.critical }
+                  ]}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="name" />
+                    <YAxis />
+                    <Tooltip />
+                    <Bar dataKey="count" fill="#7c3aed" radius={[4,4,0,0]} />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
-            )}
+              <div className="text-xs text-gray-500 mt-2">Shows how many readings fall into each turbidity range.</div>
+            </div>
+
+            <div className="bg-white p-6 rounded shadow">
+              <h3 className="text-lg font-semibold mb-4">Accumulation Rate (Δ NTU)</h3>
+              <div style={{ width: '100%', height: 240 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={turbidityData.map((d, i, arr) => {
+                    if (i === 0) return { time: d.time, rate: 0 };
+                    const prev = arr[i - 1];
+                    const dtHours = (new Date(d.fullDate) - new Date(prev.fullDate)) / 3600000 || 1/3600;
+                    const diff = (d.value - prev.value) / dtHours;
+                    return { time: d.time, rate: Number(diff.toFixed(2)) };
+                  })}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="time" />
+                    <YAxis label={{ value: 'Δ NTU/hr', angle: -90, position: 'insideLeft' }} />
+                    <Tooltip />
+                    <Line type="monotone" dataKey="rate" stroke="#ef4444" strokeWidth={2.5} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="text-xs text-gray-500 mt-2">Positive = sediment increasing; Negative = decreasing</div>
+            </div>
           </div>
         </div>
 
-        {/* Chart Section */}
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-xl font-semibold text-gray-700 mb-6">Turbidity Monitoring Timeline</h2>
-          {turbidityData.length > 0 ? (
-            <div className="h-96">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={turbidityData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis 
-                    dataKey="time" 
-                    tick={{ fontSize: 12 }}
-                    angle={-45}
-                    textAnchor="end"
-                    height={80}
-                  />
-                  <YAxis 
-                    label={{ 
-                      value: 'Turbidity (NTU)', 
-                      angle: -90, 
-                      position: 'insideLeft',
-                      offset: -10 
-                    }}
-                  />
-                  <ReferenceLine y={thresholds.normal} stroke="green" strokeDasharray="3 3" label="Normal" />
-                  <ReferenceLine y={thresholds.warning} stroke="orange" strokeDasharray="3 3" label="Warning" />
-                  <ReferenceLine y={thresholds.danger} stroke="red" strokeDasharray="3 3" label="Danger" />
-                  <ReferenceLine y={thresholds.critical} stroke="darkred" strokeDasharray="3 3" label="Critical" />
-                  
-                  <Tooltip 
-                    formatter={(value) => [`${value} NTU`, 'Turbidity']}
-                    labelFormatter={(label, payload) => {
-                      if (payload && payload[0]) {
-                        return payload[0].payload.fullDate.toLocaleString();
-                      }
-                      return label;
-                    }}
-                  />
-                  <Line 
-                    type="monotone" 
-                    dataKey="value" 
-                    stroke="#3b82f6" 
-                    strokeWidth={3}
-                    dot={{ fill: '#3b82f6', strokeWidth: 2, r: 4 }}
-                    activeDot={{ r: 6, fill: '#1d4ed8' }}
-                    isAnimationActive={true}
-                    animationDuration={500}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <div className="h-96 flex items-center justify-center bg-gray-100 rounded-lg">
-              <div className="text-center text-gray-500">
-                <p className="text-lg mb-2">📊 No data available</p>
-                <p className="text-sm">Waiting for turbidity monitoring data...</p>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Refresh Button */}
+        {/* manual refresh */}
         <div className="flex justify-center">
-          <button
-            onClick={fetchTurbidityData}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-8 rounded-lg transition-colors shadow-md flex items-center"
-          >
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
+          <button onClick={fetchTurbidityData} className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 px-8 rounded shadow inline-flex items-center">
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581" /></svg>
             Manual Refresh
           </button>
         </div>
