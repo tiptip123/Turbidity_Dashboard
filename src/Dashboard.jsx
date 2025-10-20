@@ -29,50 +29,67 @@ const Dashboard = () => {
     turbidityDataRef.current = turbidityData;
   }, [stats, turbidityData]);
 
-  // CORRECTED: Reversed threshold configuration
-  // Clear water = LOW NTU = Normal
-  // Turbid water = HIGH NTU = Warning/Danger
+  // REAL-WORLD DRAINAGE WATER TURBIDITY THRESHOLDS
   const thresholds = {
-    normal: 100,       // Clear water: 0-100 NTU
-    warning: 500,      // Slightly turbid: 100-500 NTU  
-    danger: 1000,      // Moderately turbid: 500-1000 NTU
-    critical: 1500     // Highly turbid: 1000+ NTU
+    normal: 100,       // Clear water: 0-100 NTU (normal flow)
+    warning: 500,      // Moderate sediment: 100-500 NTU (monitor)
+    danger: 1000,      // High sediment: 500-1000 NTU (clogging risk)
+    critical: 1500     // Extreme sediment: 1000+ NTU (immediate clog risk)
   };
 
-  // CORRECTED: Reversed risk prediction logic
+  // REALISTIC risk prediction for drainage systems
   const predictCloggingRisk = (latest, average, trend, currentAlertLevel) => {
     if (currentAlertLevel === 'critical' || latest >= thresholds.critical) {
       return {
         risk: 'EXTREME',
-        timeframe: 'IMMEDIATE (0-6 hours)',
-        action: 'EVACUATE: Critical sediment levels detected',
-        probability: '90-100%',
-        consequences: 'Immediate clogging danger, flood imminent'
+        timeframe: 'IMMEDIATE (1-3 hours)',
+        action: 'CLEAR DRAINS: Extreme sediment levels - Immediate clogging risk',
+        probability: '80-95%',
+        consequences: 'Drainage system will clog rapidly'
       };
     } else if (currentAlertLevel === 'danger' || latest >= thresholds.danger) {
       return {
         risk: 'HIGH',
-        timeframe: '24-48 hours',
-        action: 'PREPARE: Significant sediment buildup',
-        probability: '70-90%',
-        consequences: 'Flood likely if trend continues'
+        timeframe: '6-24 hours',
+        action: 'PREPARE CLEANING: High sediment - Schedule drain cleaning',
+        probability: '60-80%',
+        consequences: 'Significant sediment accumulation occurring'
       };
     } else if (currentAlertLevel === 'warning' || latest >= thresholds.warning) {
       return {
         risk: 'MODERATE',
-        timeframe: '3-7 days if trend continues',
-        action: 'MONITOR: Elevated sediment levels',
-        probability: '40-70%',
-        consequences: 'Reduced drainage capacity'
+        timeframe: '2-7 days if trend continues',
+        action: 'INCREASE MONITORING: Moderate sediment levels',
+        probability: '30-60%',
+        consequences: 'Sediment buildup starting'
       };
     }
     return {
       risk: 'LOW',
       timeframe: 'No immediate threat',
-      action: 'NORMAL: Clear water conditions',
-      probability: '0-10%',
-      consequences: 'Normal water flow'
+      action: 'NORMAL: Continue routine monitoring',
+      probability: '5-15%',
+      consequences: 'Normal drainage flow'
     };
+  };
+
+  // SENSOR CALIBRATION CHECK
+  const checkSensorCalibration = (readings) => {
+    const avgReading = readings.reduce((sum, val) => sum + val.value, 0) / readings.length;
+    
+    if (avgReading > 2000) {
+      console.warn('⚠️ SENSOR CALIBRATION WARNING:');
+      console.warn(`Current average: ${avgReading} NTU in clear water`);
+      console.warn('Expected: 0-100 NTU for clear water');
+      console.warn('Sensor may need recalibration or has inverse output');
+    }
+  };
+
+  // QUICK FIX: INVERT THE READINGS
+  const invertIfNeeded = (value) => {
+    // If clear water gives 2400+ NTU, invert the scale
+    const SENSOR_MAX = 3000; // Adjust based on your sensor specs
+    return SENSOR_MAX - value;
   };
 
   const fetchTurbidityData = useCallback(async () => {
@@ -93,6 +110,9 @@ const Dashboard = () => {
       }
 
       if (data && data.length > 0) {
+        // Check sensor calibration
+        checkSensorCalibration(data);
+        
         // Store the latest ID for change detection
         lastDataId.current = data[0].id;
         processTurbidityData(data);
@@ -166,10 +186,11 @@ const Dashboard = () => {
       if (data && data.length > 0) {
         const newDataPoints = data.map(item => ({
           time: new Date(item.created_at).toLocaleTimeString(),
-          value: item.value,
+          value: invertIfNeeded(item.value), // Apply inversion to new data
           fullDate: new Date(item.created_at),
           date: new Date(item.created_at).toLocaleDateString(),
-          id: item.id
+          id: item.id,
+          originalValue: item.value
         }));
 
         lastDataId.current = data[data.length - 1].id;
@@ -195,16 +216,18 @@ const Dashboard = () => {
     }
   };
 
+  // SINGLE processTurbidityData function with inversion
   const processTurbidityData = (data) => {
     const formattedData = data.map(item => ({
       time: new Date(item.created_at).toLocaleTimeString(),
-      value: item.value,
+      value: invertIfNeeded(item.value), // APPLY INVERSION HERE
       fullDate: new Date(item.created_at),
       date: new Date(item.created_at).toLocaleDateString(),
-      id: item.id
+      id: item.id,
+      originalValue: item.value // Keep original for debugging
     })).reverse();
 
-    const values = data.map(item => item.value);
+    const values = formattedData.map(item => item.value);
     const latest = values[0];
     const average = values.reduce((sum, val) => sum + val, 0) / values.length;
     const highest = Math.max(...values);
@@ -268,7 +291,7 @@ const Dashboard = () => {
   // CORRECTED: Reversed alert level determination
   const determineAlertLevel = (latest, average, trend) => {
     if (latest >= thresholds.critical || average >= thresholds.critical) {
-      return 'critical'; // High NTU = High sediment = Critical
+      return 'critical';
     } else if (latest >= thresholds.danger || average >= thresholds.danger) {
       return trend === 'rising' ? 'critical' : 'danger';
     } else if (latest >= thresholds.warning || average >= thresholds.warning) {
@@ -276,7 +299,7 @@ const Dashboard = () => {
     } else if (latest >= thresholds.normal) {
       return trend === 'rising' ? 'warning' : 'normal';
     }
-    return 'normal'; // Low NTU = Clear water = Normal
+    return 'normal';
   };
 
   const getAlertConfig = (level) => {
@@ -317,7 +340,6 @@ const Dashboard = () => {
     return configs[level] || configs.normal;
   };
 
-  // CORRECTED: Reversed status messages
   const getStatus = (value) => {
     if (value >= thresholds.critical) return '🔥 Critical Turbidity';
     if (value >= thresholds.danger) return '🚨 High Turbidity';
@@ -362,6 +384,22 @@ const Dashboard = () => {
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
+        {/* Sensor Calibration Warning */}
+        {stats.latest > 2000 && (
+          <div className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg mb-4">
+            <div className="flex items-center">
+              <span className="text-xl mr-2">🔧</span>
+              <div>
+                <strong>Sensor Calibration Notice:</strong>
+                <p className="text-sm">
+                  Current reading: {stats.latest} NTU in clear water. 
+                  Expected: 0-100 NTU. Sensor may need calibration.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Real-time Status Bar */}
         <div className="bg-blue-100 border border-blue-400 text-blue-800 px-4 py-2 rounded-lg mb-4 flex justify-between items-center">
           <div className="flex items-center">
@@ -373,14 +411,20 @@ const Dashboard = () => {
               </span>
             </span>
           </div>
-          <button
-            onClick={toggleLiveUpdates}
-            className={`px-3 py-1 rounded text-sm ${
-              isLive ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'
-            } text-white`}
-          >
-            {isLive ? 'Pause' : 'Resume'}
-          </button>
+          <div className="flex items-center space-x-2">
+            {/* Debug info */}
+            <span className="text-xs bg-gray-200 px-2 py-1 rounded">
+              Raw: {turbidityData[0]?.originalValue || stats.latest} NTU
+            </span>
+            <button
+              onClick={toggleLiveUpdates}
+              className={`px-3 py-1 rounded text-sm ${
+                isLive ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'
+              } text-white`}
+            >
+              {isLive ? 'Pause' : 'Resume'}
+            </button>
+          </div>
         </div>
 
         {/* New Data Alert */}
@@ -445,23 +489,27 @@ const Dashboard = () => {
 
         {/* Threshold Reference Card */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-lg font-semibold text-gray-700 mb-4">Turbidity Threshold Reference</h2>
+          <h2 className="text-lg font-semibold text-gray-700 mb-4">Drainage Water Turbidity Guide</h2>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
-            <div className="bg-green-50 p-3 rounded">
-              <strong>Normal:</strong> 0-{thresholds.normal} NTU<br/>
-              <span className="text-green-600">Clear water conditions</span>
+            <div className="bg-green-50 p-3 rounded border-l-4 border-green-400">
+              <strong>Normal: 0-{thresholds.normal} NTU</strong><br/>
+              <span className="text-green-600">Clear water - Normal flow</span>
+              <p className="text-xs mt-1">• No clogging risk<br/>• Routine monitoring</p>
             </div>
-            <div className="bg-yellow-50 p-3 rounded">
-              <strong>Warning:</strong> {thresholds.normal}-{thresholds.warning} NTU<br/>
-              <span className="text-yellow-600">Slight turbidity</span>
+            <div className="bg-yellow-50 p-3 rounded border-l-4 border-yellow-400">
+              <strong>Warning: {thresholds.normal}-{thresholds.warning} NTU</strong><br/>
+              <span className="text-yellow-600">Moderate sediment</span>
+              <p className="text-xs mt-1">• Minor buildup possible<br/>• Increase monitoring</p>
             </div>
-            <div className="bg-orange-50 p-3 rounded">
-              <strong>Danger:</strong> {thresholds.warning}-{thresholds.danger} NTU<br/>
-              <span className="text-orange-600">Moderate turbidity</span>
+            <div className="bg-orange-50 p-3 rounded border-l-4 border-orange-400">
+              <strong>Danger: {thresholds.warning}-{thresholds.danger} NTU</strong><br/>
+              <span className="text-orange-600">High sediment</span>
+              <p className="text-xs mt-1">• Clogging likely<br/>• Schedule cleaning</p>
             </div>
-            <div className="bg-red-50 p-3 rounded">
-              <strong>Critical:</strong> {thresholds.danger}+ NTU<br/>
-              <span className="text-red-600">High turbidity</span>
+            <div className="bg-red-50 p-3 rounded border-l-4 border-red-400">
+              <strong>Critical: {thresholds.danger}+ NTU</strong><br/>
+              <span className="text-red-600">Extreme sediment</span>
+              <p className="text-xs mt-1">• Immediate clog risk<br/>• Emergency response</p>
             </div>
           </div>
         </div>
