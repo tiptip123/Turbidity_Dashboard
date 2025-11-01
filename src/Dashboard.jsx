@@ -6,13 +6,14 @@ import {
 } from 'recharts';
 
 // SIDEWALK DRAINAGE TURBIDITY THRESHOLDS
-// Based on real-world urban drainage water quality standards
-// ESP32 sends NTU values directly (0-3000 range from map(4000, 1000, 0, 3000))
+// Aligned with ESP32 research-based thresholds for drainage systems
+// ESP32 uses map(rawValue, 0, 4000, 0, 3000) - higher raw = higher NTU (direct mapping)
 const thresholds = {
-  normal: 50,     // Clear drainage water (normal runoff)
-  warning: 200,   // Moderate sediment (light debris, leaves)
-  danger: 500,    // High sediment (significant debris, silt)
-  critical: 1000  // Extreme sediment (clogging imminent - requires immediate action)
+  normal: 100.0,        // Clear water - normal flow
+  warning: 500.0,       // Silt accumulation begins
+  highRisk: 1000.0,     // Significant sedimentation risk
+  clogging: 2000.0,     // High probability of clogging
+  flooding: 2500.0      // Immediate flooding risk
 };
 
 const Dashboard = () => {
@@ -47,50 +48,95 @@ const Dashboard = () => {
     turbidityDataRef.current = turbidityData;
   }, [stats, turbidityData]);
 
-  // Sidewalk drainage clogging risk assessment
+  // Assess flood risk based on ESP32 thresholds - must be defined before predictCloggingRisk
+  const assessFloodRisk = useCallback((ntu) => {
+    if (ntu < thresholds.normal) return 'LOW';
+    else if (ntu < thresholds.warning) return 'MODERATE';
+    else if (ntu < thresholds.highRisk) return 'HIGH';
+    else if (ntu < thresholds.clogging) return 'VERY HIGH';
+    else return 'EXTREME';
+  }, []);
+
+  // Get sedimentation level based on ESP32 thresholds - must be defined before predictCloggingRisk
+  const getSedimentationLevel = useCallback((ntu) => {
+    if (ntu < 100) return 'Clear Water';
+    else if (ntu < 500) return 'Light Sediment';
+    else if (ntu < 1000) return 'Moderate Sediment';
+    else if (ntu < 2000) return 'Heavy Sediment';
+    else return 'Severe Clogging Risk';
+  }, []);
+
+  // Sidewalk drainage clogging risk assessment - aligned with ESP32 thresholds
   const predictCloggingRisk = useCallback((latest, average, trend, currentAlertLevel) => {
-    if (currentAlertLevel === 'critical' || latest >= thresholds.critical) {
+    const floodRisk = assessFloodRisk(latest);
+    const sedimentLevel = getSedimentationLevel(latest);
+
+    if (latest >= thresholds.flooding) {
       return {
         risk: 'EXTREME',
-        timeframe: 'IMMEDIATE (1-3 hours)',
-        action: 'URGENT: Clear sidewalk drain immediately - High flooding risk',
-        probability: '85-95%',
-        consequences: 'Sidewalk flooding imminent - Public safety hazard',
-        maintenance: 'Emergency drain cleaning required - Dispatch crew immediately'
+        floodRisk: 'EXTREME',
+        sedimentLevel: 'Severe Clogging Risk',
+        timeframe: 'IMMEDIATE (10-30 minutes)',
+        action: '💥 CRITICAL: FLOODING IMMINENT - EMERGENCY RESPONSE REQUIRED',
+        probability: '95-99%',
+        consequences: 'Sidewalk flooding imminent - Public safety critical hazard',
+        maintenance: 'EMERGENCY: Dispatch crew immediately - Activate emergency protocol',
+        samplingInterval: '10 seconds (Maximum sampling rate)'
       };
-    } else if (currentAlertLevel === 'danger' || latest >= thresholds.danger) {
+    } else if (latest >= thresholds.clogging) {
+      return {
+        risk: 'VERY HIGH',
+        floodRisk: 'VERY HIGH',
+        sedimentLevel: 'Heavy Sediment',
+        timeframe: 'IMMEDIATE (30 minutes - 2 hours)',
+        action: '🚨 ALERT: DRAINAGE CLOGGING LIKELY - IMMEDIATE ACTION NEEDED',
+        probability: '85-95%',
+        consequences: 'Drainage system will clog rapidly - High flooding risk',
+        maintenance: 'URGENT: Drain cleaning required - Dispatch within 1 hour',
+        samplingInterval: '30 seconds (High risk sampling)'
+      };
+    } else if (latest >= thresholds.highRisk) {
       return {
         risk: 'HIGH',
+        floodRisk: 'HIGH',
+        sedimentLevel: 'Moderate Sediment',
         timeframe: '4-12 hours',
         action: 'Schedule drain cleaning within 24 hours - Monitor closely',
         probability: '65-80%',
         consequences: 'Moderate flooding risk during rain - Potential sidewalk blockage',
-        maintenance: 'Schedule maintenance within 24 hours'
+        maintenance: 'Schedule maintenance within 24 hours',
+        samplingInterval: '1 minute (Elevated monitoring)'
       };
-    } else if (currentAlertLevel === 'warning' || latest >= thresholds.warning) {
+    } else if (latest >= thresholds.warning) {
       return {
         risk: 'MODERATE',
+        floodRisk: 'MODERATE',
+        sedimentLevel: 'Light Sediment',
         timeframe: '1-3 days if trend continues',
         action: 'Plan routine cleaning - Monitor accumulation rate',
         probability: '35-60%',
-        consequences: 'Light debris accumulation - Reduce drainage efficiency',
-        maintenance: 'Schedule routine maintenance within 1 week'
+        consequences: 'Light debris accumulation - Reduced drainage efficiency',
+        maintenance: 'Schedule routine maintenance within 1 week',
+        samplingInterval: '1 minute (Warning monitoring)'
       };
     }
     return {
       risk: 'LOW',
+      floodRisk: 'LOW',
+      sedimentLevel: 'Clear Water',
       timeframe: 'No immediate threat',
       action: 'Normal operation - Continue routine monitoring',
       probability: '5-20%',
       consequences: 'Clear drainage flow - Normal urban runoff',
-      maintenance: 'Continue routine inspections'
+      maintenance: 'Continue routine inspections',
+      samplingInterval: '5 minutes (Normal monitoring)'
     };
-  }, []);
+  }, [assessFloodRisk, getSedimentationLevel]);
 
   // Sensor validation - ESP32 sends NTU values directly (0-3000)
-  // Raw sensor range: 4000 (clear) to 1000 (turbid) → NTU: 0 (clear) to 3000 (turbid)
+  // ESP32 uses map(rawValue, 0, 4000, 0, 3000) - direct mapping (higher raw = higher NTU)
   const checkSensorCalibration = (readings) => {
-    if (!readings || readings.length === 0) return;
+    if (!readings || readings.length === 0) return false;
     const avgReading = readings.reduce((sum, val) => sum + val.value, 0) / readings.length;
     // Check if values are out of expected NTU range (0-3000)
     if (avgReading > 3000 || avgReading < 0) {
@@ -100,8 +146,8 @@ const Dashboard = () => {
     return false;
   };
 
-  // ESP32 already converts raw value to NTU, so use value directly
-  // No inversion needed - ESP32 map(rawValue, 4000, 1000, 0, 3000) handles conversion
+  // ESP32 converts raw value to NTU using direct mapping
+  // map(rawValue, 0, 4000, 0, 3000) - no inversion needed
   const processSensorValue = (value) => {
     // ESP32 sends integer NTU values (0-3000)
     // Ensure value is within expected range
@@ -123,14 +169,16 @@ const Dashboard = () => {
     return 'stable';
   };
 
-  // Helper functions that don't depend on state - define first
+  // Determine alert level based on ESP32 thresholds
   const determineAlertLevel = useCallback((latest, average, trend) => {
-    if (latest >= thresholds.critical || average >= thresholds.critical) {
-      return 'critical';
-    } else if (latest >= thresholds.danger || average >= thresholds.danger) {
-      return trend === 'rising' ? 'critical' : 'danger';
+    if (latest >= thresholds.flooding || average >= thresholds.flooding) {
+      return 'flooding';
+    } else if (latest >= thresholds.clogging || average >= thresholds.clogging) {
+      return 'clogging';
+    } else if (latest >= thresholds.highRisk || average >= thresholds.highRisk) {
+      return trend === 'rising' ? 'clogging' : 'highRisk';
     } else if (latest >= thresholds.warning || average >= thresholds.warning) {
-      return trend === 'rising' ? 'danger' : 'warning';
+      return trend === 'rising' ? 'highRisk' : 'warning';
     } else if (latest >= thresholds.normal) {
       return trend === 'rising' ? 'warning' : 'normal';
     }
@@ -162,29 +210,38 @@ const Dashboard = () => {
     setAccumulationRate(Number(avgRate.toFixed(2)));
     const current = formatted[formatted.length - 1].value;
     if (avgRate > 0) {
-      const ntuLeft = thresholds.critical - current;
+      const ntuLeft = thresholds.clogging - current;
       const hoursToClog = ntuLeft > 0 ? (ntuLeft / avgRate) : 0;
       setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
     } else {
       setDaysToClog(null);
     }
-    const stability = Math.max(0, 100 - Math.min(100, Math.abs(avgRate) / thresholds.critical * 100));
+    // stability index: 100 - (relative std-like fraction)
+    // approximate: stability = 100 - clamp(|avgRate| / clogging threshold * 100)
+    const stability = Math.max(0, 100 - Math.min(100, Math.abs(avgRate) / thresholds.clogging * 100));
     setStabilityIndex(Math.round(stability));
   }, []);
 
   const computeDistribution = useCallback((values) => {
-    const bins = { normal: 0, warning: 0, danger: 0, critical: 0 };
+    const bins = { normal: 0, warning: 0, highRisk: 0, clogging: 0, flooding: 0 };
     if (!values || values.length === 0) {
-      setDistribution(bins);
+      setDistribution({ normal: 0, warning: 0, danger: 0, critical: 0 });
       return;
     }
     values.forEach(v => {
       if (v < thresholds.normal) bins.normal++;
       else if (v < thresholds.warning) bins.warning++;
-      else if (v < thresholds.danger) bins.danger++;
-      else bins.critical++;
+      else if (v < thresholds.highRisk) bins.highRisk++;
+      else if (v < thresholds.clogging) bins.clogging++;
+      else bins.flooding++;
     });
-    setDistribution(bins);
+    // Map to existing state structure for backward compatibility
+    setDistribution({
+      normal: bins.normal,
+      warning: bins.warning + bins.highRisk,
+      danger: bins.clogging,
+      critical: bins.flooding
+    });
   }, []);
 
   // main process function — transforms and calculates analytics
@@ -334,8 +391,12 @@ const Dashboard = () => {
         setLastUpdate(new Date());
         setError(null);
       } else {
+        // Show empty state but don't set error - this is normal if no data yet
         setTurbidityData([]);
-        setError('No data found in turbidity_readings table for selected range');
+        // Only show error if it's not a fresh fetch (i.e., we've loaded before)
+        if (turbidityDataRef.current.length > 0) {
+          setError('No data found in turbidity_readings table for selected range');
+        }
       }
     } catch (err) {
       console.error('Error:', err);
@@ -355,27 +416,30 @@ const Dashboard = () => {
     return () => clearInterval(intervalId);
   }, [isLive, fetchTurbidityData, checkForNewData]);
 
-  // small helpers
+  // small helpers - aligned with ESP32 thresholds
   const getAlertConfig = (level) => {
     const configs = {
-      normal: { color: 'green', icon: '✅', message: 'Clear drainage - Normal sidewalk runoff conditions', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
-      warning: { color: 'yellow', icon: '⚠️', message: 'Moderate debris - Light accumulation in sidewalk drain', bgColor: 'bg-yellow-100', borderColor: 'border-yellow-400', textColor: 'text-yellow-800' },
-      danger: { color: 'orange', icon: '🚨', message: 'High sediment - Drain cleaning required to prevent flooding', bgColor: 'bg-orange-100', borderColor: 'border-orange-400', textColor: 'text-orange-800' },
-      critical: { color: 'red', icon: '🔥', message: 'CRITICAL - Immediate drain cleaning required - Sidewalk flooding risk', bgColor: 'bg-red-100', borderColor: 'border-red-400', textColor: 'text-red-800' }
+      normal: { color: 'green', icon: '✅', message: 'Clear Water - Normal sidewalk drainage flow', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
+      warning: { color: 'yellow', icon: '🔸', message: 'Light Sediment - Silt accumulation begins', bgColor: 'bg-yellow-100', borderColor: 'border-yellow-400', textColor: 'text-yellow-800' },
+      highRisk: { color: 'orange', icon: '🔶', message: 'Moderate Sediment - Significant sedimentation risk', bgColor: 'bg-orange-100', borderColor: 'border-orange-400', textColor: 'text-orange-800' },
+      clogging: { color: 'red', icon: '🚨', message: 'Heavy Sediment - High probability of clogging', bgColor: 'bg-red-100', borderColor: 'border-red-400', textColor: 'text-red-800' },
+      flooding: { color: 'darkred', icon: '💥', message: 'CRITICAL: FLOODING IMMINENT - EMERGENCY RESPONSE REQUIRED', bgColor: 'bg-red-200', borderColor: 'border-red-600', textColor: 'text-red-900' }
     };
     return configs[level] || configs.normal;
   };
 
   const getStatus = (v) => {
-    if (v >= thresholds.critical) return '🔥 Critical - Clogging Imminent';
-    if (v >= thresholds.danger) return '🚨 High - Clean Soon';
-    if (v >= thresholds.warning) return '⚠️ Moderate - Monitor Closely';
-    return '✅ Clear - Normal Flow';
+    if (v >= thresholds.flooding) return '💥 EXTREME - Flooding Imminent';
+    if (v >= thresholds.clogging) return '🚨 VERY HIGH - Clogging Likely';
+    if (v >= thresholds.highRisk) return '🔶 HIGH - Significant Risk';
+    if (v >= thresholds.warning) return '🔸 MODERATE - Monitor Closely';
+    return '✅ LOW - Clear Water';
   };
 
   const getStatusColor = (v) => {
-    if (v >= thresholds.critical) return 'text-red-700';
-    if (v >= thresholds.danger) return 'text-orange-600';
+    if (v >= thresholds.flooding) return 'text-red-900';
+    if (v >= thresholds.clogging) return 'text-red-700';
+    if (v >= thresholds.highRisk) return 'text-orange-600';
     if (v >= thresholds.warning) return 'text-yellow-600';
     return 'text-green-600';
   };
@@ -384,20 +448,30 @@ const Dashboard = () => {
 
   const toggleLiveUpdates = () => setIsLive(!isLive);
 
-  // build insight summary for sidewalk drainage
+  // build insight summary for sidewalk drainage - aligned with ESP32 logic
   const buildInsight = () => {
     if (!turbidityData || turbidityData.length < 2) return 'Collecting initial data from sidewalk drainage sensor...';
     const rate = accumulationRate;
-    if (rate >= thresholds.critical * 0.1) {
-      return `⚠️ Rapid debris accumulation detected (~${rate} NTU/hr) at sidewalk drain. High flooding risk — ${riskAssessment?.probability || ''}. ${daysToClog ? `Estimated blockage in ${daysToClog} days.` : ''} Dispatch maintenance crew immediately.`;
+    const floodRisk = riskAssessment?.floodRisk || 'UNKNOWN';
+    const sedimentLevel = riskAssessment?.sedimentLevel || 'UNKNOWN';
+    
+    const latestNTU = stats.latest || 0;
+    if (latestNTU >= thresholds.flooding) {
+      return `💥 CRITICAL: FLOODING IMMINENT (${latestNTU.toFixed(1)} NTU) - ${floodRisk} RISK. ${riskAssessment?.maintenance || 'Emergency response required immediately.'} Sampling rate: ${riskAssessment?.samplingInterval || 'Maximum'}`;
+    }
+    if (latestNTU >= thresholds.clogging) {
+      return `🚨 ALERT: DRAINAGE CLOGGING LIKELY (${latestNTU.toFixed(1)} NTU) - ${floodRisk} RISK. Accumulation rate: ${rate} NTU/hr. ${daysToClog ? `Estimated blockage in ${daysToClog} days.` : ''} ${riskAssessment?.maintenance || 'Immediate action needed.'}`;
+    }
+    if (rate >= thresholds.clogging * 0.1) {
+      return `⚠️ Rapid sediment accumulation detected (~${rate} NTU/hr) - ${sedimentLevel}. Flood Risk: ${floodRisk} — ${riskAssessment?.probability || ''}. ${daysToClog ? `Estimated clogging in ${daysToClog} days.` : ''} Schedule maintenance urgently.`;
     }
     if (rate > 0) {
-      return `Debris gradually accumulating (~${rate} NTU/hr) in sidewalk drainage. Stability index ${stabilityIndex}%. Schedule routine cleaning before next rainfall.`;
+      return `Sediment gradually accumulating (~${rate} NTU/hr) - ${sedimentLevel}. Flood Risk: ${floodRisk}. Stability index ${stabilityIndex}%. Monitor closely and plan routine cleaning.`;
     }
     if (rate < 0) {
-      return `✅ Debris levels decreasing - drain recently cleaned or heavy rain flushed system. Stability index ${stabilityIndex}%. System functioning normally.`;
+      return `✅ Sediment levels decreasing (${Math.abs(rate)} NTU/hr) - ${sedimentLevel}. Drain recently cleaned or heavy rain flushed system. Flood Risk: ${floodRisk}. Stability index ${stabilityIndex}%. System functioning normally.`;
     }
-    return `Stable drainage conditions. Stability index ${stabilityIndex}%. Sidewalk drain operating normally with minimal debris accumulation.`;
+    return `Stable drainage conditions - ${sedimentLevel}. Flood Risk: ${floodRisk}. Stability index ${stabilityIndex}%. Sidewalk drain operating normally.`;
   };
 
   // UI handlers
@@ -488,8 +562,10 @@ const Dashboard = () => {
           </div>
 
           ${riskAssessment ? `
-          <div style="margin: 20px 0; padding: 15px; background: ${alertLevel === 'critical' ? '#fee' : alertLevel === 'danger' ? '#fff3e0' : '#fff8e1'}; border-left: 4px solid ${alertLevel === 'critical' ? 'red' : alertLevel === 'danger' ? 'orange' : 'yellow'};">
+          <div style="margin: 20px 0; padding: 15px; background: ${alertLevel === 'flooding' || alertLevel === 'clogging' ? '#fee' : alertLevel === 'highRisk' ? '#fff3e0' : '#fff8e1'}; border-left: 4px solid ${alertLevel === 'flooding' || alertLevel === 'clogging' ? 'red' : alertLevel === 'highRisk' ? 'orange' : 'yellow'};">
             <strong>Risk Assessment:</strong> ${riskAssessment.risk}<br>
+            <strong>Flood Risk:</strong> ${riskAssessment.floodRisk || 'N/A'}<br>
+            <strong>Sediment Level:</strong> ${riskAssessment.sedimentLevel || 'N/A'}<br>
             <strong>Timeframe:</strong> ${riskAssessment.timeframe}<br>
             <strong>Probability:</strong> ${riskAssessment.probability}<br>
             <strong>Action:</strong> ${riskAssessment.action}
@@ -510,15 +586,18 @@ const Dashboard = () => {
               ${turbidityData.map((record, index) => {
                 let statusClass = 'status-normal';
                 let statusText = 'Clear Water';
-                if (record.value >= thresholds.critical) {
+                if (record.value >= thresholds.flooding) {
                   statusClass = 'status-critical';
-                  statusText = 'Critical';
-                } else if (record.value >= thresholds.danger) {
+                  statusText = 'Flooding Risk';
+                } else if (record.value >= thresholds.clogging) {
+                  statusClass = 'status-critical';
+                  statusText = 'Clogging Risk';
+                } else if (record.value >= thresholds.highRisk) {
                   statusClass = 'status-danger';
-                  statusText = 'High';
+                  statusText = 'High Risk';
                 } else if (record.value >= thresholds.warning) {
                   statusClass = 'status-warning';
-                  statusText = 'Moderate';
+                  statusText = 'Warning';
                 }
                 return `
                   <tr>
@@ -535,7 +614,7 @@ const Dashboard = () => {
 
           <div class="footer">
             <p>Report generated from Turbidity Dashboard | ${new Date().toLocaleString()}</p>
-            <p>Thresholds: Normal (0-${thresholds.normal-1} NTU), Warning (${thresholds.normal}-${thresholds.warning-1} NTU), Danger (${thresholds.warning}-${thresholds.danger-1} NTU), Critical (${thresholds.danger}+ NTU)</p>
+            <p>Thresholds: Normal (&lt;${thresholds.normal} NTU), Warning (${thresholds.normal}-${thresholds.warning-1} NTU), High Risk (${thresholds.warning}-${thresholds.highRisk-1} NTU), Clogging (${thresholds.highRisk}-${thresholds.clogging-1} NTU), Flooding (${thresholds.clogging}+ NTU)</p>
           </div>
         </body>
       </html>
@@ -663,19 +742,27 @@ const Dashboard = () => {
             <span className="text-2xl mr-3 mt-1">{alertConfig.icon}</span>
             <div className="flex-1">
               <h2 className="text-xl font-bold">Turbidity Alert: {alertConfig.message}</h2>
-              <div className="mt-2 grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
-                <div><strong>Risk Level:</strong> <span className="ml-2 font-semibold">{riskAssessment?.risk ?? 'N/A'}</span></div>
+              <div className="mt-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+                <div><strong>Flood Risk:</strong> <span className="ml-2 font-semibold">{riskAssessment?.floodRisk ?? 'N/A'}</span></div>
                 <div><strong>Timeframe:</strong> <span className="ml-2">{riskAssessment?.timeframe ?? 'N/A'}</span></div>
                 <div><strong>Probability:</strong> <span className="ml-2">{riskAssessment?.probability ?? 'N/A'}</span></div>
-                <div><strong>Action:</strong> <span className="ml-2">{riskAssessment?.action ?? 'N/A'}</span></div>
+                <div><strong>Sediment:</strong> <span className="ml-2">{riskAssessment?.sedimentLevel ?? 'N/A'}</span></div>
+              </div>
+              <div className="mt-2 text-sm">
+                <strong>Action Required:</strong> <span className="ml-2">{riskAssessment?.action ?? 'N/A'}</span>
               </div>
 
               <p className="text-sm mt-2">
-                <strong>Current Reading:</strong> {stats.latest} NTU — {stats.latest < thresholds.normal ? 'Clear Drainage Water' : stats.latest >= thresholds.critical ? 'Severe Clogging Risk' : 'Turbid - Requires Attention'}
+                <strong>Current Reading:</strong> {(stats.latest || 0).toFixed(1)} NTU — <strong>Flood Risk:</strong> {riskAssessment?.floodRisk || 'N/A'} | <strong>Sediment Level:</strong> {riskAssessment?.sedimentLevel || 'N/A'}
               </p>
               {riskAssessment?.maintenance && (
                 <p className="text-sm mt-2 font-semibold">
                   <strong>Maintenance Action:</strong> {riskAssessment.maintenance}
+                </p>
+              )}
+              {riskAssessment?.samplingInterval && (
+                <p className="text-xs mt-1 text-gray-600">
+                  <strong>ESP32 Sampling:</strong> {riskAssessment.samplingInterval}
                 </p>
               )}
             </div>
@@ -753,10 +840,11 @@ const Dashboard = () => {
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="time" minTickGap={20} />
                     <YAxis label={{ value: 'NTU', angle: -90, position: 'insideLeft' }} />
-                    <ReferenceLine y={thresholds.normal} stroke="green" label="Normal" />
-                    <ReferenceLine y={thresholds.warning} stroke="orange" label="Warning" />
-                    <ReferenceLine y={thresholds.danger} stroke="red" label="Danger" />
-                    <ReferenceLine y={thresholds.critical} stroke="darkred" label="Critical" />
+                    <ReferenceLine y={thresholds.normal} stroke="green" label="Normal (100)" />
+                    <ReferenceLine y={thresholds.warning} stroke="orange" label="Warning (500)" />
+                    <ReferenceLine y={thresholds.highRisk} stroke="orangered" label="High Risk (1000)" />
+                    <ReferenceLine y={thresholds.clogging} stroke="red" label="Clogging (2000)" />
+                    <ReferenceLine y={thresholds.flooding} stroke="darkred" strokeDasharray="5 5" label="Flooding (2500)" />
                     <Tooltip formatter={(v) => `${v} NTU`} labelFormatter={(label, payload) => (payload && payload[0] ? payload[0].payload.fullDate.toLocaleString() : label)} />
                     <Line type="monotone" dataKey="value" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 6 }} />
                   </LineChart>
@@ -775,9 +863,10 @@ const Dashboard = () => {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={[
                     { name: '0-99', count: distribution.normal },
-                    { name: '100-499', count: distribution.warning },
-                    { name: '500-999', count: distribution.danger },
-                    { name: '1000+', count: distribution.critical }
+                    { name: '100-499', count: Math.floor(distribution.warning / 2) },
+                    { name: '500-999', count: Math.floor(distribution.warning / 2) },
+                    { name: '1000-1999', count: distribution.danger },
+                    { name: '2000+', count: distribution.critical }
                   ]}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="name" />
