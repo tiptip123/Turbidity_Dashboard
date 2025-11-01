@@ -5,17 +5,25 @@ import {
   BarChart, Bar
 } from 'recharts';
 
+// REAL-WORLD DRAINAGE WATER TURBIDITY THRESHOLDS
+const thresholds = {
+  normal: 100,    // Clear water
+  warning: 500,   // Moderate sediment
+  danger: 1000,   // High sediment
+  critical: 1500  // Extreme sediment
+};
+
 const Dashboard = () => {
   // core data + ui
   const [turbidityData, setTurbidityData] = useState([]);
-const [loading, setLoading] = useState(true);
-const [stats, setStats] = useState({ latest: 0, average: 0, highest: 0, trend: 'stable' });
-const [error, setError] = useState(null);
-const [alertLevel, setAlertLevel] = useState('normal');
-const [lastUpdate, setLastUpdate] = useState(new Date());
-const [isLive, setIsLive] = useState(false);
-const [newDataAlert, setNewDataAlert] = useState(false);
-const [riskAssessment, setRiskAssessment] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState({ latest: 0, average: 0, highest: 0, trend: 'stable' });
+  const [error, setError] = useState(null);
+  const [alertLevel, setAlertLevel] = useState('normal');
+  const [lastUpdate, setLastUpdate] = useState(new Date());
+  const [isLive, setIsLive] = useState(false);
+  const [newDataAlert, setNewDataAlert] = useState(false);
+  const [riskAssessment, setRiskAssessment] = useState(null);
 
   // sediment analytics
   const [accumulationRate, setAccumulationRate] = useState(0); // NTU/hour
@@ -37,16 +45,8 @@ const [riskAssessment, setRiskAssessment] = useState(null);
     turbidityDataRef.current = turbidityData;
   }, [stats, turbidityData]);
 
-  // REAL-WORLD DRAINAGE WATER TURBIDITY THRESHOLDS
-  const thresholds = {
-    normal: 100,    // Clear water
-    warning: 500,   // Moderate sediment
-    danger: 1000,   // High sediment
-    critical: 1500  // Extreme sediment
-  };
-
   // Risk prediction (keeps your existing messaging)
-  const predictCloggingRisk = (latest, average, trend, currentAlertLevel) => {
+  const predictCloggingRisk = useCallback((latest, average, trend, currentAlertLevel) => {
     if (currentAlertLevel === 'critical' || latest >= thresholds.critical) {
       return {
         risk: 'EXTREME',
@@ -79,7 +79,7 @@ const [riskAssessment, setRiskAssessment] = useState(null);
       probability: '5-15%',
       consequences: 'Normal drainage flow'
     };
-  };
+  }, []);
 
   // calibration check (logs to console; also shows UI notice when avg too high)
   const checkSensorCalibration = (readings) => {
@@ -97,8 +97,186 @@ const [riskAssessment, setRiskAssessment] = useState(null);
     return SENSOR_MAX - value;
   };
 
-  // Build a Supabase date filter based on the timeRange
-  const buildDateFilter = () => {
+  // calculate trend helper function
+  const calculateTrend = (values) => {
+    if (!values || values.length < 2) return 'stable';
+    const mid = Math.floor(values.length / 2);
+    const first = values.slice(0, mid);
+    const second = values.slice(mid);
+    const avg1 = first.reduce((a, b) => a + b, 0) / first.length;
+    const avg2 = second.reduce((a, b) => a + b, 0) / second.length;
+    if (avg2 > avg1 * 1.1) return 'rising';
+    if (avg2 < avg1 * 0.9) return 'falling';
+    return 'stable';
+  };
+
+  // Helper functions that don't depend on state - define first
+  const determineAlertLevel = useCallback((latest, average, trend) => {
+    if (latest >= thresholds.critical || average >= thresholds.critical) {
+      return 'critical';
+    } else if (latest >= thresholds.danger || average >= thresholds.danger) {
+      return trend === 'rising' ? 'critical' : 'danger';
+    } else if (latest >= thresholds.warning || average >= thresholds.warning) {
+      return trend === 'rising' ? 'danger' : 'warning';
+    } else if (latest >= thresholds.normal) {
+      return trend === 'rising' ? 'warning' : 'normal';
+    }
+    return 'normal';
+  }, []);
+
+  const computeAccumulationMetrics = useCallback((formatted) => {
+    if (!formatted || formatted.length < 2) {
+      setAccumulationRate(0);
+      setDaysToClog(null);
+      setStabilityIndex(100);
+      return;
+    }
+    const N = Math.min(6, formatted.length - 1);
+    let totalRate = 0;
+    let used = 0;
+    for (let i = formatted.length - N; i < formatted.length; i++) {
+      const cur = formatted[i];
+      const prev = formatted[i - 1];
+      if (!prev) continue;
+      const dtHours = (cur.fullDate - prev.fullDate) / 3600000;
+      if (dtHours <= 0) continue;
+      const dntu = (cur.value - prev.value);
+      const rate = dntu / dtHours;
+      totalRate += rate;
+      used++;
+    }
+    const avgRate = used ? totalRate / used : 0;
+    setAccumulationRate(Number(avgRate.toFixed(2)));
+    const current = formatted[formatted.length - 1].value;
+    if (avgRate > 0) {
+      const ntuLeft = thresholds.critical - current;
+      const hoursToClog = ntuLeft > 0 ? (ntuLeft / avgRate) : 0;
+      setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
+    } else {
+      setDaysToClog(null);
+    }
+    const stability = Math.max(0, 100 - Math.min(100, Math.abs(avgRate) / thresholds.critical * 100));
+    setStabilityIndex(Math.round(stability));
+  }, []);
+
+  const computeDistribution = useCallback((values) => {
+    const bins = { normal: 0, warning: 0, danger: 0, critical: 0 };
+    if (!values || values.length === 0) {
+      setDistribution(bins);
+      return;
+    }
+    values.forEach(v => {
+      if (v < thresholds.normal) bins.normal++;
+      else if (v < thresholds.warning) bins.warning++;
+      else if (v < thresholds.danger) bins.danger++;
+      else bins.critical++;
+    });
+    setDistribution(bins);
+  }, []);
+
+  // main process function — transforms and calculates analytics
+  const processTurbidityData = useCallback((data) => {
+    const formatted = data
+      .map(item => ({
+        time: new Date(item.created_at).toLocaleTimeString(),
+        value: invertIfNeeded(item.value),
+        fullDate: new Date(item.created_at),
+        date: new Date(item.created_at).toLocaleDateString(),
+        id: item.id,
+        originalValue: item.value
+      }))
+      .reverse();
+    const values = formatted.map(d => Number(d.value) || 0);
+    const latest = values.length ? values[values.length - 1] : 0;
+    const average = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+    const highest = values.length ? Math.max(...values) : 0;
+    const trend = calculateTrend(values.slice(-10));
+    const alert = determineAlertLevel(latest, average, trend);
+    const risk = predictCloggingRisk(latest, average, trend, alert);
+    computeAccumulationMetrics(formatted);
+    computeDistribution(values);
+    setTurbidityData(formatted.slice(-1000));
+    chartDataRef.current = formatted.slice(-1000);
+    setStats({ latest, average: Math.round(average), highest, trend });
+    setAlertLevel(alert);
+    setRiskAssessment(risk);
+  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk]);
+
+  // incremental update for small inserts
+  const updateStatsIncrementally = useCallback((data) => {
+    if (!data || data.length === 0) return;
+    const values = data.map(d => Number(d.value) || 0);
+    const latest = values[values.length - 1];
+    const avg = values.reduce((a, b) => a + b, 0) / values.length;
+    const highest = Math.max(...values);
+    const trend = calculateTrend(values.slice(-10));
+    const alert = determineAlertLevel(latest, avg, trend);
+    const risk = predictCloggingRisk(latest, avg, trend, alert);
+    computeAccumulationMetrics(data);
+    computeDistribution(values);
+    setStats({ latest, average: Math.round(avg), highest, trend });
+    setAlertLevel(alert);
+    setRiskAssessment(risk);
+  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk]);
+
+  // fetch only new rows since last id
+  const fetchNewData = useCallback(async (sinceId) => {
+    try {
+      const { data, error } = await supabase
+        .from('turbidity_readings')
+        .select('id, value, created_at')
+        .gt('id', sinceId)
+        .order('id', { ascending: true });
+      if (error) {
+        console.error('Error fetching new data:', error);
+        return;
+      }
+      if (data && data.length > 0) {
+        const newDataPoints = data.map(item => ({
+          time: new Date(item.created_at).toLocaleTimeString(),
+          value: invertIfNeeded(item.value),
+          fullDate: new Date(item.created_at),
+          date: new Date(item.created_at).toLocaleDateString(),
+          id: item.id,
+          originalValue: item.value
+        }));
+        lastDataId.current = data[data.length - 1].id;
+        const updatedData = [...turbidityDataRef.current, ...newDataPoints].slice(-1000);
+        setTurbidityData(updatedData);
+        chartDataRef.current = updatedData;
+        updateStatsIncrementally(updatedData);
+        setNewDataAlert(true);
+        setLastUpdate(new Date());
+        setTimeout(() => setNewDataAlert(false), 4000);
+      }
+    } catch (err) {
+      console.error('Error fetching new rows:', err);
+    }
+  }, [updateStatsIncrementally]);
+
+  // check for newest row
+  const checkForNewData = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('turbidity_readings')
+        .select('id')
+        .order('id', { ascending: false })
+        .limit(1);
+      if (error) {
+        console.error('Error checking for new data:', error);
+        return;
+      }
+      if (data && data.length > 0) {
+        const latestId = data[0].id;
+        if (latestId > lastDataId.current) fetchNewData(lastDataId.current);
+      }
+    } catch (err) {
+      console.error('Error in data check:', err);
+    }
+  }, [fetchNewData]);
+
+  // Build a Supabase date filter based on the timeRange - memoized
+  const buildDateFilter = useCallback(() => {
     const now = new Date();
     if (timeRange === 'today') {
       const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0).toISOString();
@@ -108,10 +286,9 @@ const [riskAssessment, setRiskAssessment] = useState(null);
       const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
       return (query) => query.gte('created_at', start);
     }
-    // month
     const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
     return (query) => query.gte('created_at', start);
-  };
+  }, [timeRange]);
 
   // fetch data (with time filter)
   const fetchTurbidityData = useCallback(async () => {
@@ -153,7 +330,7 @@ const [riskAssessment, setRiskAssessment] = useState(null);
     } finally {
       setLoading(false);
     }
-  }, [timeRange]);
+  }, [buildDateFilter, processTurbidityData]);
 
   useEffect(() => {
     fetchTurbidityData();
@@ -163,209 +340,7 @@ const [riskAssessment, setRiskAssessment] = useState(null);
     }, 10000);
 
     return () => clearInterval(intervalId);
-  }, [isLive, fetchTurbidityData]);
-
-  // check for newest row
-  const checkForNewData = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('turbidity_readings')
-        .select('id')
-        .order('id', { ascending: false })
-        .limit(1);
-
-      if (error) {
-        console.error('Error checking for new data:', error);
-        return;
-      }
-
-      if (data && data.length > 0) {
-        const latestId = data[0].id;
-        if (latestId > lastDataId.current) fetchNewData(lastDataId.current);
-      }
-    } catch (err) {
-      console.error('Error in data check:', err);
-    }
-  };
-
-  // fetch only new rows since last id
-  const fetchNewData = async (sinceId) => {
-    try {
-      const { data, error } = await supabase
-        .from('turbidity_readings')
-        .select('id, value, created_at')
-        .gt('id', sinceId)
-        .order('id', { ascending: true });
-
-      if (error) {
-        console.error('Error fetching new data:', error);
-        return;
-      }
-
-      if (data && data.length > 0) {
-        const newDataPoints = data.map(item => ({
-          time: new Date(item.created_at).toLocaleTimeString(),
-          value: invertIfNeeded(item.value),
-          fullDate: new Date(item.created_at),
-          date: new Date(item.created_at).toLocaleDateString(),
-          id: item.id,
-          originalValue: item.value
-        }));
-
-        lastDataId.current = data[data.length - 1].id;
-        const updatedData = [...turbidityDataRef.current, ...newDataPoints].slice(-1000);
-        setTurbidityData(updatedData);
-        chartDataRef.current = updatedData;
-        updateStatsIncrementally(updatedData);
-        setNewDataAlert(true);
-        setLastUpdate(new Date());
-        setTimeout(() => setNewDataAlert(false), 4000);
-      }
-    } catch (err) {
-      console.error('Error fetching new rows:', err);
-    }
-  };
-
-  // main process function — transforms and calculates analytics
-  const processTurbidityData = (data) => {
-    // map + invert + reverse (so chronological ascending)
-    const formatted = data
-      .map(item => ({
-        time: new Date(item.created_at).toLocaleTimeString(),
-        value: invertIfNeeded(item.value),
-        fullDate: new Date(item.created_at),
-        date: new Date(item.created_at).toLocaleDateString(),
-        id: item.id,
-        originalValue: item.value
-      }))
-      .reverse();
-
-    // compute stats
-    const values = formatted.map(d => Number(d.value) || 0);
-    const latest = values.length ? values[values.length - 1] : 0;
-    const average = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
-    const highest = values.length ? Math.max(...values) : 0;
-    const trend = calculateTrend(values.slice(-10));
-    const alert = determineAlertLevel(latest, average, trend);
-    const risk = predictCloggingRisk(latest, average, trend, alert);
-
-    // accumulation analytics
-    computeAccumulationMetrics(formatted);
-
-    // distribution
-    computeDistribution(values);
-
-    setTurbidityData(formatted.slice(-1000));
-    chartDataRef.current = formatted.slice(-1000);
-    setStats({ latest, average: Math.round(average), highest, trend });
-    setAlertLevel(alert);
-    setRiskAssessment(risk);
-  };
-
-  // incremental update for small inserts
-  const updateStatsIncrementally = (data) => {
-    if (!data || data.length === 0) return;
-    const values = data.map(d => Number(d.value) || 0);
-    const latest = values[values.length - 1];
-    const avg = values.reduce((a, b) => a + b, 0) / values.length;
-    const highest = Math.max(...values);
-    const trend = calculateTrend(values.slice(-10));
-    const alert = determineAlertLevel(latest, avg, trend);
-    const risk = predictCloggingRisk(latest, avg, trend, alert);
-
-    computeAccumulationMetrics(data);
-    computeDistribution(values);
-
-    setStats({ latest, average: Math.round(avg), highest, trend });
-    setAlertLevel(alert);
-    setRiskAssessment(risk);
-  };
-
-  // accumulation metrics: rate, days to clog, stability
-  const computeAccumulationMetrics = (formatted) => {
-    // need at least two points
-    if (!formatted || formatted.length < 2) {
-      setAccumulationRate(0);
-      setDaysToClog(null);
-      setStabilityIndex(100);
-      return;
-    }
-
-    // compute slope over last N points (e.g., last 6)
-    const N = Math.min(6, formatted.length - 1);
-    let totalRate = 0;
-    let used = 0;
-    for (let i = formatted.length - N; i < formatted.length; i++) {
-      const cur = formatted[i];
-      const prev = formatted[i - 1];
-      if (!prev) continue;
-      const dtHours = (cur.fullDate - prev.fullDate) / 3600000;
-      if (dtHours <= 0) continue;
-      const dntu = (cur.value - prev.value);
-      const rate = dntu / dtHours; // NTU per hour
-      totalRate += rate;
-      used++;
-    }
-
-    const avgRate = used ? totalRate / used : 0; // NTU/hour (can be negative)
-    setAccumulationRate(Number(avgRate.toFixed(2)));
-
-    // predict days to critical (only if trending upwards)
-    const current = formatted[formatted.length - 1].value;
-    if (avgRate > 0) {
-      const ntuLeft = thresholds.critical - current;
-      const hoursToClog = ntuLeft > 0 ? (ntuLeft / avgRate) : 0;
-      setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
-    } else {
-      setDaysToClog(null);
-    }
-
-    // stability index: 100 - (relative std-like fraction)
-    // approximate: stability = 100 - clamp(|avgRate| / critical * 100)
-    const stability = Math.max(0, 100 - Math.min(100, Math.abs(avgRate) / thresholds.critical * 100));
-    setStabilityIndex(Math.round(stability));
-  };
-
-  // distribution histogram counts
-  const computeDistribution = (values) => {
-    const bins = { normal: 0, warning: 0, danger: 0, critical: 0 };
-    if (!values || values.length === 0) {
-      setDistribution(bins);
-      return;
-    }
-    values.forEach(v => {
-      if (v < thresholds.normal) bins.normal++;
-      else if (v < thresholds.warning) bins.warning++;
-      else if (v < thresholds.danger) bins.danger++;
-      else bins.critical++;
-    });
-    setDistribution(bins);
-  };
-
-  const calculateTrend = (values) => {
-    if (!values || values.length < 2) return 'stable';
-    const mid = Math.floor(values.length / 2);
-    const first = values.slice(0, mid);
-    const second = values.slice(mid);
-    const avg1 = first.reduce((a, b) => a + b, 0) / first.length;
-    const avg2 = second.reduce((a, b) => a + b, 0) / second.length;
-    if (avg2 > avg1 * 1.1) return 'rising';
-    if (avg2 < avg1 * 0.9) return 'falling';
-    return 'stable';
-  };
-
-  const determineAlertLevel = (latest, average, trend) => {
-    if (latest >= thresholds.critical || average >= thresholds.critical) {
-      return 'critical';
-    } else if (latest >= thresholds.danger || average >= thresholds.danger) {
-      return trend === 'rising' ? 'critical' : 'danger';
-    } else if (latest >= thresholds.warning || average >= thresholds.warning) {
-      return trend === 'rising' ? 'danger' : 'warning';
-    } else if (latest >= thresholds.normal) {
-      return trend === 'rising' ? 'warning' : 'normal';
-    }
-    return 'normal';
-  };
+  }, [isLive, fetchTurbidityData, checkForNewData]);
 
   // small helpers
   const getAlertConfig = (level) => {
@@ -417,6 +392,154 @@ const [riskAssessment, setRiskAssessment] = useState(null);
     setTimeRange(range);
   };
 
+  // Print records function
+  const handlePrint = () => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('Please allow pop-ups to print records');
+      return;
+    }
+
+    const printContent = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Turbidity Records Report</title>
+          <style>
+            @media print {
+              body { margin: 0; padding: 20px; font-family: Arial, sans-serif; }
+            }
+            body { margin: 20px; font-family: Arial, sans-serif; }
+            .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 20px; }
+            .header h1 { margin: 0; color: #2563eb; }
+            .header p { margin: 5px 0; color: #666; }
+            .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 30px 0; padding: 20px; background: #f5f5f5; border-radius: 8px; }
+            .summary-item { text-align: center; }
+            .summary-item strong { display: block; margin-bottom: 5px; color: #333; }
+            .summary-item span { font-size: 24px; font-weight: bold; color: #2563eb; }
+            table { width: 100%; border-collapse: collapse; margin: 30px 0; }
+            th { background: #2563eb; color: white; padding: 12px; text-align: left; font-weight: bold; }
+            td { padding: 10px; border-bottom: 1px solid #ddd; }
+            tr:nth-child(even) { background: #f9f9f9; }
+            .status-normal { color: green; font-weight: bold; }
+            .status-warning { color: orange; font-weight: bold; }
+            .status-danger { color: red; font-weight: bold; }
+            .status-critical { color: darkred; font-weight: bold; }
+            .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd; text-align: center; color: #666; font-size: 12px; }
+            @page { size: A4 landscape; margin: 1cm; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>Sediment & Turbidity Dashboard Report</h1>
+            <p>Generated: ${new Date().toLocaleString()}</p>
+            <p>Time Range: ${timeRange.charAt(0).toUpperCase() + timeRange.slice(1)} | Total Records: ${turbidityData.length}</p>
+          </div>
+
+          <div class="summary">
+            <div class="summary-item">
+              <strong>Latest Reading</strong>
+              <span>${stats.latest} NTU</span>
+            </div>
+            <div class="summary-item">
+              <strong>Average</strong>
+              <span>${stats.average} NTU</span>
+            </div>
+            <div class="summary-item">
+              <strong>Peak</strong>
+              <span>${stats.highest} NTU</span>
+            </div>
+            <div class="summary-item">
+              <strong>Trend</strong>
+              <span>${stats.trend}</span>
+            </div>
+          </div>
+
+          <div class="summary">
+            <div class="summary-item">
+              <strong>Accumulation Rate</strong>
+              <span>${accumulationRate} NTU/hr</span>
+            </div>
+            <div class="summary-item">
+              <strong>Days to Clog</strong>
+              <span>${daysToClog !== null ? daysToClog + ' days' : 'Stable'}</span>
+            </div>
+            <div class="summary-item">
+              <strong>Stability Index</strong>
+              <span>${stabilityIndex}%</span>
+            </div>
+            <div class="summary-item">
+              <strong>Alert Level</strong>
+              <span>${alertLevel.toUpperCase()}</span>
+            </div>
+          </div>
+
+          ${riskAssessment ? `
+          <div style="margin: 20px 0; padding: 15px; background: ${alertLevel === 'critical' ? '#fee' : alertLevel === 'danger' ? '#fff3e0' : '#fff8e1'}; border-left: 4px solid ${alertLevel === 'critical' ? 'red' : alertLevel === 'danger' ? 'orange' : 'yellow'};">
+            <strong>Risk Assessment:</strong> ${riskAssessment.risk}<br>
+            <strong>Timeframe:</strong> ${riskAssessment.timeframe}<br>
+            <strong>Probability:</strong> ${riskAssessment.probability}<br>
+            <strong>Action:</strong> ${riskAssessment.action}
+          </div>
+          ` : ''}
+
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Date & Time</th>
+                <th>Value (NTU)</th>
+                <th>Raw Value</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${turbidityData.map((record, index) => {
+                let statusClass = 'status-normal';
+                let statusText = 'Clear Water';
+                if (record.value >= thresholds.critical) {
+                  statusClass = 'status-critical';
+                  statusText = 'Critical';
+                } else if (record.value >= thresholds.danger) {
+                  statusClass = 'status-danger';
+                  statusText = 'High';
+                } else if (record.value >= thresholds.warning) {
+                  statusClass = 'status-warning';
+                  statusText = 'Moderate';
+                }
+                return `
+                  <tr>
+                    <td>${index + 1}</td>
+                    <td>${record.fullDate.toLocaleString()}</td>
+                    <td>${record.value.toFixed(2)}</td>
+                    <td>${record.originalValue ?? record.value}</td>
+                    <td class="${statusClass}">${statusText}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+
+          <div class="footer">
+            <p>Report generated from Turbidity Dashboard | ${new Date().toLocaleString()}</p>
+            <p>Thresholds: Normal (0-${thresholds.normal-1} NTU), Warning (${thresholds.normal}-${thresholds.warning-1} NTU), Danger (${thresholds.warning}-${thresholds.danger-1} NTU), Critical (${thresholds.danger}+ NTU)</p>
+          </div>
+        </body>
+      </html>
+    `;
+
+    printWindow.document.write(printContent);
+    printWindow.document.close();
+    printWindow.focus();
+    
+    // Wait for content to load, then print
+    setTimeout(() => {
+      printWindow.print();
+      // Optional: Close after printing (uncomment if desired)
+      // printWindow.close();
+    }, 250);
+  };
+
   // small loading state
   if (loading) {
     return (
@@ -431,6 +554,41 @@ const [riskAssessment, setRiskAssessment] = useState(null);
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
+        {/* Error Message */}
+        {error && (
+          <div className="bg-red-100 border border-red-400 text-red-800 px-4 py-3 rounded-lg mb-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                <span className="text-xl mr-2">❌</span>
+                <div>
+                  <strong>Error:</strong>
+                  <p className="text-sm">{error}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setError(null)} 
+                className="text-red-800 hover:text-red-900 ml-4"
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* New Data Alert */}
+        {newDataAlert && (
+          <div className="bg-green-100 border border-green-400 text-green-800 px-4 py-3 rounded-lg mb-4 animate-pulse">
+            <div className="flex items-center">
+              <span className="text-xl mr-2">✨</span>
+              <div>
+                <strong>New Data Available!</strong>
+                <p className="text-sm">Fresh readings have been added to the dashboard.</p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Sensor Calibration Notice */}
         {stats.latest > 2000 && (
           <div className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg mb-4">
@@ -623,11 +781,20 @@ const [riskAssessment, setRiskAssessment] = useState(null);
           </div>
         </div>
 
-        {/* manual refresh */}
-        <div className="flex justify-center">
+        {/* manual refresh and print */}
+        <div className="flex justify-center gap-4">
           <button onClick={fetchTurbidityData} className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 px-8 rounded shadow inline-flex items-center">
             <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581" /></svg>
             Manual Refresh
+          </button>
+          
+          <button 
+            onClick={handlePrint} 
+            disabled={turbidityData.length === 0}
+            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-medium py-3 px-8 rounded shadow inline-flex items-center"
+          >
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+            Print Records
           </button>
         </div>
       </div>
