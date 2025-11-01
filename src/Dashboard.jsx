@@ -5,12 +5,14 @@ import {
   BarChart, Bar
 } from 'recharts';
 
-// REAL-WORLD DRAINAGE WATER TURBIDITY THRESHOLDS
+// SIDEWALK DRAINAGE TURBIDITY THRESHOLDS
+// Based on real-world urban drainage water quality standards
+// ESP32 sends NTU values directly (0-3000 range from map(4000, 1000, 0, 3000))
 const thresholds = {
-  normal: 100,    // Clear water
-  warning: 500,   // Moderate sediment
-  danger: 1000,   // High sediment
-  critical: 1500  // Extreme sediment
+  normal: 50,     // Clear drainage water (normal runoff)
+  warning: 200,   // Moderate sediment (light debris, leaves)
+  danger: 500,    // High sediment (significant debris, silt)
+  critical: 1000  // Extreme sediment (clogging imminent - requires immediate action)
 };
 
 const Dashboard = () => {
@@ -45,56 +47,67 @@ const Dashboard = () => {
     turbidityDataRef.current = turbidityData;
   }, [stats, turbidityData]);
 
-  // Risk prediction (keeps your existing messaging)
+  // Sidewalk drainage clogging risk assessment
   const predictCloggingRisk = useCallback((latest, average, trend, currentAlertLevel) => {
     if (currentAlertLevel === 'critical' || latest >= thresholds.critical) {
       return {
         risk: 'EXTREME',
         timeframe: 'IMMEDIATE (1-3 hours)',
-        action: 'CLEAR DRAINS: Extreme sediment levels - Immediate clogging risk',
-        probability: '80-95%',
-        consequences: 'Drainage system will clog rapidly'
+        action: 'URGENT: Clear sidewalk drain immediately - High flooding risk',
+        probability: '85-95%',
+        consequences: 'Sidewalk flooding imminent - Public safety hazard',
+        maintenance: 'Emergency drain cleaning required - Dispatch crew immediately'
       };
     } else if (currentAlertLevel === 'danger' || latest >= thresholds.danger) {
       return {
         risk: 'HIGH',
-        timeframe: '6-24 hours',
-        action: 'PREPARE CLEANING: High sediment - Schedule drain cleaning',
-        probability: '60-80%',
-        consequences: 'Significant sediment accumulation occurring'
+        timeframe: '4-12 hours',
+        action: 'Schedule drain cleaning within 24 hours - Monitor closely',
+        probability: '65-80%',
+        consequences: 'Moderate flooding risk during rain - Potential sidewalk blockage',
+        maintenance: 'Schedule maintenance within 24 hours'
       };
     } else if (currentAlertLevel === 'warning' || latest >= thresholds.warning) {
       return {
         risk: 'MODERATE',
-        timeframe: '2-7 days if trend continues',
-        action: 'INCREASE MONITORING: Moderate sediment levels',
-        probability: '30-60%',
-        consequences: 'Sediment buildup starting'
+        timeframe: '1-3 days if trend continues',
+        action: 'Plan routine cleaning - Monitor accumulation rate',
+        probability: '35-60%',
+        consequences: 'Light debris accumulation - Reduce drainage efficiency',
+        maintenance: 'Schedule routine maintenance within 1 week'
       };
     }
     return {
       risk: 'LOW',
       timeframe: 'No immediate threat',
-      action: 'NORMAL: Continue routine monitoring',
-      probability: '5-15%',
-      consequences: 'Normal drainage flow'
+      action: 'Normal operation - Continue routine monitoring',
+      probability: '5-20%',
+      consequences: 'Clear drainage flow - Normal urban runoff',
+      maintenance: 'Continue routine inspections'
     };
   }, []);
 
-  // calibration check (logs to console; also shows UI notice when avg too high)
+  // Sensor validation - ESP32 sends NTU values directly (0-3000)
+  // Raw sensor range: 4000 (clear) to 1000 (turbid) → NTU: 0 (clear) to 3000 (turbid)
   const checkSensorCalibration = (readings) => {
     if (!readings || readings.length === 0) return;
     const avgReading = readings.reduce((sum, val) => sum + val.value, 0) / readings.length;
-    if (avgReading > 2000) {
-      console.warn('⚠️ SENSOR CALIBRATION WARNING: avg:', avgReading);
+    // Check if values are out of expected NTU range (0-3000)
+    if (avgReading > 3000 || avgReading < 0) {
+      console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected NTU value:', avgReading);
+      return true;
     }
+    return false;
   };
 
-  // quick inversion if sensor returns inverse mapping
-  const invertIfNeeded = (value) => {
-    const SENSOR_MAX = 3000;
-    // If it's clearly inverted in practice, this line flips it.
-    return SENSOR_MAX - value;
+  // ESP32 already converts raw value to NTU, so use value directly
+  // No inversion needed - ESP32 map(rawValue, 4000, 1000, 0, 3000) handles conversion
+  const processSensorValue = (value) => {
+    // ESP32 sends integer NTU values (0-3000)
+    // Ensure value is within expected range
+    if (value < 0) return 0;
+    if (value > 3000) return 3000;
+    return Math.round(value);
   };
 
   // calculate trend helper function
@@ -179,11 +192,11 @@ const Dashboard = () => {
     const formatted = data
       .map(item => ({
         time: new Date(item.created_at).toLocaleTimeString(),
-        value: invertIfNeeded(item.value),
+        value: processSensorValue(item.value), // ESP32 sends NTU directly, no inversion needed
         fullDate: new Date(item.created_at),
         date: new Date(item.created_at).toLocaleDateString(),
         id: item.id,
-        originalValue: item.value
+        originalValue: item.value // Store original for debugging
       }))
       .reverse();
     const values = formatted.map(d => Number(d.value) || 0);
@@ -234,7 +247,7 @@ const Dashboard = () => {
       if (data && data.length > 0) {
         const newDataPoints = data.map(item => ({
           time: new Date(item.created_at).toLocaleTimeString(),
-          value: invertIfNeeded(item.value),
+          value: processSensorValue(item.value), // ESP32 sends NTU directly
           fullDate: new Date(item.created_at),
           date: new Date(item.created_at).toLocaleDateString(),
           id: item.id,
@@ -345,19 +358,19 @@ const Dashboard = () => {
   // small helpers
   const getAlertConfig = (level) => {
     const configs = {
-      normal: { color: 'green', icon: '✅', message: 'Clear water - Normal conditions', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
-      warning: { color: 'yellow', icon: '⚠️', message: 'Slight turbidity - Monitor closely', bgColor: 'bg-yellow-100', borderColor: 'border-yellow-400', textColor: 'text-yellow-800' },
-      danger: { color: 'orange', icon: '🚨', message: 'Moderate turbidity - Flood risk increasing', bgColor: 'bg-orange-100', borderColor: 'border-orange-400', textColor: 'text-orange-800' },
-      critical: { color: 'red', icon: '🔥', message: 'High turbidity - Immediate action required', bgColor: 'bg-red-100', borderColor: 'border-red-400', textColor: 'text-red-800' }
+      normal: { color: 'green', icon: '✅', message: 'Clear drainage - Normal sidewalk runoff conditions', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
+      warning: { color: 'yellow', icon: '⚠️', message: 'Moderate debris - Light accumulation in sidewalk drain', bgColor: 'bg-yellow-100', borderColor: 'border-yellow-400', textColor: 'text-yellow-800' },
+      danger: { color: 'orange', icon: '🚨', message: 'High sediment - Drain cleaning required to prevent flooding', bgColor: 'bg-orange-100', borderColor: 'border-orange-400', textColor: 'text-orange-800' },
+      critical: { color: 'red', icon: '🔥', message: 'CRITICAL - Immediate drain cleaning required - Sidewalk flooding risk', bgColor: 'bg-red-100', borderColor: 'border-red-400', textColor: 'text-red-800' }
     };
     return configs[level] || configs.normal;
   };
 
   const getStatus = (v) => {
-    if (v >= thresholds.critical) return '🔥 Critical Turbidity';
-    if (v >= thresholds.danger) return '🚨 High Turbidity';
-    if (v >= thresholds.warning) return '⚠️ Moderate Turbidity';
-    return '✅ Clear Water';
+    if (v >= thresholds.critical) return '🔥 Critical - Clogging Imminent';
+    if (v >= thresholds.danger) return '🚨 High - Clean Soon';
+    if (v >= thresholds.warning) return '⚠️ Moderate - Monitor Closely';
+    return '✅ Clear - Normal Flow';
   };
 
   const getStatusColor = (v) => {
@@ -371,20 +384,20 @@ const Dashboard = () => {
 
   const toggleLiveUpdates = () => setIsLive(!isLive);
 
-  // build AI-like insight summary
+  // build insight summary for sidewalk drainage
   const buildInsight = () => {
-    if (!turbidityData || turbidityData.length < 2) return 'Waiting for more data to generate insights.';
+    if (!turbidityData || turbidityData.length < 2) return 'Collecting initial data from sidewalk drainage sensor...';
     const rate = accumulationRate;
     if (rate >= thresholds.critical * 0.1) {
-      return `Sediment accumulation is rising quickly (~${rate} NTU/hr). High clogging risk — ${riskAssessment?.probability || ''}. ${daysToClog ? `Estimated clogging in ${daysToClog} days.` : ''}`;
+      return `⚠️ Rapid debris accumulation detected (~${rate} NTU/hr) at sidewalk drain. High flooding risk — ${riskAssessment?.probability || ''}. ${daysToClog ? `Estimated blockage in ${daysToClog} days.` : ''} Dispatch maintenance crew immediately.`;
     }
     if (rate > 0) {
-      return `Sediment slowly increasing (~${rate} NTU/hr). Monitor the drains; stability index ${stabilityIndex}%.`;
+      return `Debris gradually accumulating (~${rate} NTU/hr) in sidewalk drainage. Stability index ${stabilityIndex}%. Schedule routine cleaning before next rainfall.`;
     }
     if (rate < 0) {
-      return `Sediment levels decreasing (cleaning/flush effect). Stability index ${stabilityIndex}%.`;
+      return `✅ Debris levels decreasing - drain recently cleaned or heavy rain flushed system. Stability index ${stabilityIndex}%. System functioning normally.`;
     }
-    return `Stable sediment levels. Stability index ${stabilityIndex}%.`;
+    return `Stable drainage conditions. Stability index ${stabilityIndex}%. Sidewalk drain operating normally with minimal debris accumulation.`;
   };
 
   // UI handlers
@@ -431,7 +444,7 @@ const Dashboard = () => {
         </head>
         <body>
           <div class="header">
-            <h1>Sediment & Turbidity Dashboard Report</h1>
+            <h1>Sidewalk Drainage Monitoring Report</h1>
             <p>Generated: ${new Date().toLocaleString()}</p>
             <p>Time Range: ${timeRange.charAt(0).toUpperCase() + timeRange.slice(1)} | Total Records: ${turbidityData.length}</p>
           </div>
@@ -544,7 +557,10 @@ const Dashboard = () => {
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">Loading real-time sediment analytics...</div>
+        <div className="text-center">
+          <div className="text-xl text-gray-600 mb-2">Loading Sidewalk Drainage Monitoring System...</div>
+          <div className="text-sm text-gray-500">Connecting to ESP32 sensor...</div>
+        </div>
       </div>
     );
   }
@@ -589,20 +605,31 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* Sensor Calibration Notice */}
-        {stats.latest > 2000 && (
+        {/* Sensor Status Notice */}
+        {checkSensorCalibration(turbidityData.length > 0 ? turbidityData.map(d => ({value: d.value})) : []) && (
           <div className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg mb-4">
             <div className="flex items-center">
               <span className="text-xl mr-2">🔧</span>
               <div>
-                <strong>Sensor Calibration Notice:</strong>
+                <strong>Sensor Status Alert:</strong>
                 <p className="text-sm">
-                  Current sensor average is high — check sensor wiring/calibration.
+                  Unexpected NTU values detected — check ESP32 sensor connection or calibration at sidewalk drain location.
                 </p>
               </div>
             </div>
           </div>
         )}
+
+        {/* Location Info */}
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2 rounded-lg mb-4 text-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <span className="mr-2">📍</span>
+              <span><strong>Monitoring:</strong> Sidewalk Drainage System | ESP32 Sensor Active | Update Frequency: 5 seconds</span>
+            </div>
+            <span className="text-xs bg-blue-200 px-2 py-1 rounded">Live</span>
+          </div>
+        </div>
 
         {/* Status bar + time range */}
         <div className="bg-white border px-4 py-3 rounded-lg mb-4 flex items-center justify-between">
@@ -644,13 +671,19 @@ const Dashboard = () => {
               </div>
 
               <p className="text-sm mt-2">
-                <strong>Current Reading:</strong> {stats.latest} NTU — {stats.latest < thresholds.normal ? 'Clear Water' : 'Turbid Water'}
+                <strong>Current Reading:</strong> {stats.latest} NTU — {stats.latest < thresholds.normal ? 'Clear Drainage Water' : stats.latest >= thresholds.critical ? 'Severe Clogging Risk' : 'Turbid - Requires Attention'}
               </p>
+              {riskAssessment?.maintenance && (
+                <p className="text-sm mt-2 font-semibold">
+                  <strong>Maintenance Action:</strong> {riskAssessment.maintenance}
+                </p>
+              )}
             </div>
           </div>
         </div>
 
-        <h1 className="text-3xl font-semibold text-gray-800 mb-6">Sediment & Turbidity Dashboard</h1>
+        <h1 className="text-3xl font-semibold text-gray-800 mb-2">Sidewalk Drainage Monitoring System</h1>
+        <p className="text-gray-600 mb-6">Real-time turbidity monitoring for urban sidewalk drainage infrastructure</p>
 
         {/* Main Stats */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
@@ -682,15 +715,15 @@ const Dashboard = () => {
         {/* Sediment Analytics Panel */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h3 className="font-semibold text-gray-700 mb-2">Accumulation Rate</h3>
+            <h3 className="font-semibold text-gray-700 mb-2">Debris Accumulation Rate</h3>
             <div className="text-3xl font-bold text-indigo-600">{accumulationRate} NTU/hr</div>
-            <div className="text-xs text-gray-500 mt-1">Recent average rate (positive = increasing)</div>
+            <div className="text-xs text-gray-500 mt-1">Rate of debris buildup in sidewalk drain (positive = accumulating)</div>
           </div>
 
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h3 className="font-semibold text-gray-700 mb-2">Days to Clog (est.)</h3>
-            <div className="text-3xl font-bold text-red-600">{daysToClog !== null ? `${daysToClog} days` : 'Stable'}</div>
-            <div className="text-xs text-gray-500 mt-1">Estimate based on current rate & critical threshold</div>
+            <h3 className="font-semibold text-gray-700 mb-2">Estimated Time to Blockage</h3>
+            <div className="text-3xl font-bold text-red-600">{daysToClog !== null ? `${daysToClog} days` : 'No immediate risk'}</div>
+            <div className="text-xs text-gray-500 mt-1">Projected days until drain blockage if trend continues</div>
           </div>
 
           <div className="bg-white rounded-lg shadow-md p-6">
@@ -712,7 +745,7 @@ const Dashboard = () => {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
           {/* Timeline */}
           <div className="bg-white p-6 rounded shadow">
-            <h3 className="text-lg font-semibold mb-4">Turbidity Monitoring Timeline</h3>
+            <h3 className="text-lg font-semibold mb-4">Sidewalk Drainage Turbidity Timeline</h3>
             {turbidityData.length > 0 ? (
               <div style={{ width: '100%', height: 360 }}>
                 <ResponsiveContainer width="100%" height="100%">
@@ -737,7 +770,7 @@ const Dashboard = () => {
           {/* Distribution & accumulation */}
           <div className="space-y-6">
             <div className="bg-white p-6 rounded shadow">
-              <h3 className="text-lg font-semibold mb-4">Sediment Distribution</h3>
+              <h3 className="text-lg font-semibold mb-4">Debris Distribution Analysis</h3>
               <div style={{ width: '100%', height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={[
@@ -754,11 +787,11 @@ const Dashboard = () => {
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-              <div className="text-xs text-gray-500 mt-2">Shows how many readings fall into each turbidity range.</div>
+              <div className="text-xs text-gray-500 mt-2">Distribution of readings showing debris levels in sidewalk drainage.</div>
             </div>
 
             <div className="bg-white p-6 rounded shadow">
-              <h3 className="text-lg font-semibold mb-4">Accumulation Rate (Δ NTU)</h3>
+              <h3 className="text-lg font-semibold mb-4">Debris Accumulation Rate (Δ NTU/hr)</h3>
               <div style={{ width: '100%', height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={turbidityData.map((d, i, arr) => {
@@ -776,7 +809,7 @@ const Dashboard = () => {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-              <div className="text-xs text-gray-500 mt-2">Positive = sediment increasing; Negative = decreasing</div>
+              <div className="text-xs text-gray-500 mt-2">Positive = debris accumulating (clogging risk); Negative = debris clearing (rain or cleaning)</div>
             </div>
           </div>
         </div>
