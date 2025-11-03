@@ -7,7 +7,8 @@ import {
 
 // SIDEWALK DRAINAGE TURBIDITY THRESHOLDS
 // Aligned with ESP32 research-based thresholds for drainage systems
-// ESP32 uses map(rawValue, 0, 4000, 0, 3000) - higher raw = higher NTU (direct mapping)
+// NOTE: Sensor behavior observed in field tests indicates lower raw values correspond to higher turbidity.
+// Therefore, we invert incoming raw values: NTU = 3000 - clamp(raw, 0, 3000).
 const thresholds = {
   normal: 100.0,        // Clear water - normal flow
   warning: 500.0,       // Silt accumulation begins
@@ -48,28 +49,10 @@ const Dashboard = () => {
     turbidityDataRef.current = turbidityData;
   }, [stats, turbidityData]);
 
-  // Assess flood risk based on ESP32 thresholds - must be defined before predictCloggingRisk
-  const assessFloodRisk = useCallback((ntu) => {
-    if (ntu < thresholds.normal) return 'LOW';
-    else if (ntu < thresholds.warning) return 'MODERATE';
-    else if (ntu < thresholds.highRisk) return 'HIGH';
-    else if (ntu < thresholds.clogging) return 'VERY HIGH';
-    else return 'EXTREME';
-  }, []);
-
-  // Get sedimentation level based on ESP32 thresholds - must be defined before predictCloggingRisk
-  const getSedimentationLevel = useCallback((ntu) => {
-    if (ntu < 100) return 'Clear Water';
-    else if (ntu < 500) return 'Light Sediment';
-    else if (ntu < 1000) return 'Moderate Sediment';
-    else if (ntu < 2000) return 'Heavy Sediment';
-    else return 'Severe Clogging Risk';
-  }, []);
+  // (removed: assessFloodRisk/getSedimentationLevel) — risk text is derived directly in predictCloggingRisk
 
   // Sidewalk drainage clogging risk assessment - aligned with ESP32 thresholds
-  const predictCloggingRisk = useCallback((latest, average, trend, currentAlertLevel) => {
-    const floodRisk = assessFloodRisk(latest);
-    const sedimentLevel = getSedimentationLevel(latest);
+  const predictCloggingRisk = useCallback((latest) => {
 
     if (latest >= thresholds.flooding) {
       return {
@@ -131,10 +114,11 @@ const Dashboard = () => {
       maintenance: 'Continue routine inspections',
       samplingInterval: '5 minutes (Normal monitoring)'
     };
-  }, [assessFloodRisk, getSedimentationLevel]);
+  }, []);
 
-  // Sensor validation - ESP32 sends NTU values directly (0-3000)
-  // ESP32 uses map(rawValue, 0, 4000, 0, 3000) - direct mapping (higher raw = higher NTU)
+// Sensor validation - ESP32 provides raw values where lower = more turbid (muddy)
+// Field observation: clear water produces raw readings in ~2000–2097 range
+// We convert to NTU using an inverted, calibrated piecewise mapping within 0–3000 range
   const checkSensorCalibration = (readings) => {
     if (!readings || readings.length === 0) return false;
     const avgReading = readings.reduce((sum, val) => sum + val.value, 0) / readings.length;
@@ -146,15 +130,38 @@ const Dashboard = () => {
     return false;
   };
 
-  // ESP32 converts raw value to NTU using direct mapping
-  // map(rawValue, 0, 4000, 0, 3000) - no inversion needed
-  const processSensorValue = (value) => {
-    // ESP32 sends integer NTU values (0-3000)
-    // Ensure value is within expected range
-    if (value < 0) return 0;
-    if (value > 3000) return 3000;
-    return Math.round(value);
-  };
+// Convert sensor raw reading to NTU using inverted, calibrated mapping
+const processSensorValue = (value) => {
+  // Calibration anchors (based on field tests)
+  const RAW_CLEAR_START = 2000; // start of clear-water plateau
+  const RAW_CLEAR_END = 2097;   // end of clear-water plateau
+  const NTU_AT_CLEAR_START = 50; // low turbidity at start of plateau
+  const NTU_AT_CLEAR_END = 0;    // near-zero turbidity at end of plateau
+
+  // Clamp raw to expected range
+  let raw = value;
+  if (raw < 0) raw = 0;
+  if (raw > 3000) raw = 3000;
+
+  let ntu;
+  if (raw <= RAW_CLEAR_START) {
+    // Map [0, RAW_CLEAR_START] → [3000, NTU_AT_CLEAR_START] linearly (lower raw = more turbid)
+    const slope = (NTU_AT_CLEAR_START - 3000) / (RAW_CLEAR_START - 0); // negative
+    ntu = 3000 + slope * raw;
+  } else if (raw <= RAW_CLEAR_END) {
+    // Map [RAW_CLEAR_START, RAW_CLEAR_END] → [NTU_AT_CLEAR_START, NTU_AT_CLEAR_END]
+    const slope = (NTU_AT_CLEAR_END - NTU_AT_CLEAR_START) / (RAW_CLEAR_END - RAW_CLEAR_START);
+    ntu = NTU_AT_CLEAR_START + slope * (raw - RAW_CLEAR_START);
+  } else {
+    // Above plateau is essentially clear
+    ntu = NTU_AT_CLEAR_END;
+  }
+
+  // Final clamp and round
+  if (ntu < 0) ntu = 0;
+  if (ntu > 3000) ntu = 3000;
+  return Math.round(ntu);
+};
 
   // calculate trend helper function
   const calculateTrend = (values) => {
@@ -192,33 +199,81 @@ const Dashboard = () => {
       setStabilityIndex(100);
       return;
     }
-    const N = Math.min(6, formatted.length - 1);
-    let totalRate = 0;
-    let used = 0;
-    for (let i = formatted.length - N; i < formatted.length; i++) {
-      const cur = formatted[i];
-      const prev = formatted[i - 1];
-      if (!prev) continue;
-      const dtHours = (cur.fullDate - prev.fullDate) / 3600000;
-      if (dtHours <= 0) continue;
-      const dntu = (cur.value - prev.value);
-      const rate = dntu / dtHours;
-      totalRate += rate;
-      used++;
+
+    // Use a stable window (last 10 minutes or last 20 points) to reduce noise
+    const WINDOW_MS = 10 * 60 * 1000;
+    const MAX_POINTS = 20;
+    const endIdx = formatted.length - 1;
+    let startIdx = endIdx;
+    const endTime = formatted[endIdx].fullDate.getTime();
+    while (startIdx > 0 && (endTime - formatted[startIdx - 1].fullDate.getTime()) <= WINDOW_MS && (endIdx - (startIdx - 1)) <= MAX_POINTS) {
+      startIdx--;
     }
-    const avgRate = used ? totalRate / used : 0;
-    setAccumulationRate(Number(avgRate.toFixed(2)));
-    const current = formatted[formatted.length - 1].value;
-    if (avgRate > 0) {
+    const windowData = formatted.slice(startIdx, endIdx + 1);
+    if (windowData.length < 2) {
+      // fallback to last few points
+      const slice = formatted.slice(-Math.min(6, formatted.length));
+      const first = slice[0];
+      const last = slice[slice.length - 1];
+      const dtHours = Math.max((last.fullDate - first.fullDate) / 3600000, 5 / 3600); // min 5 seconds equivalent
+      const rate = (last.value - first.value) / dtHours;
+      const clampedRate = Math.max(-200, Math.min(thresholds.flooding, rate));
+      setAccumulationRate(Number(clampedRate.toFixed(2)));
+      const current = last.value;
+      if (clampedRate > 0) {
+        const ntuLeft = thresholds.clogging - current;
+        const hoursToClog = ntuLeft > 0 ? (ntuLeft / clampedRate) : 0;
+        setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
+      } else {
+        setDaysToClog(null);
+      }
+      const stability = Math.max(0, 100 - Math.min(100, Math.abs(clampedRate) / thresholds.clogging * 100));
+      setStabilityIndex(Math.round(stability));
+      return;
+    }
+
+    // Compute slope via simple least squares (value vs time hours)
+    const t0 = windowData[0].fullDate.getTime();
+    const times = windowData.map(d => (d.fullDate.getTime() - t0) / 3600000); // hours since t0
+    const values = windowData.map(d => d.value);
+    const n = values.length;
+    const meanT = times.reduce((a, b) => a + b, 0) / n;
+    const meanV = values.reduce((a, b) => a + b, 0) / n;
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < n; i++) {
+      const dt = times[i] - meanT;
+      num += dt * (values[i] - meanV);
+      den += dt * dt;
+    }
+    let slopePerHour = den > 0 ? (num / den) : 0; // NTU per hour
+    // Clamp to avoid unrealistic spikes; allow slower clearing than buildup to avoid confusion
+    const MAX_POS_RATE = thresholds.flooding; // up to 2500 NTU/hr accumulating
+    const MAX_NEG_RATE = -200; // at most -200 NTU/hr clearing displayed
+    if (slopePerHour > MAX_POS_RATE) slopePerHour = MAX_POS_RATE;
+    if (slopePerHour < MAX_NEG_RATE) slopePerHour = MAX_NEG_RATE;
+
+    setAccumulationRate(Number(slopePerHour.toFixed(2)));
+
+    const current = windowData[windowData.length - 1].value;
+    if (slopePerHour > 0) {
       const ntuLeft = thresholds.clogging - current;
-      const hoursToClog = ntuLeft > 0 ? (ntuLeft / avgRate) : 0;
+      const hoursToClog = ntuLeft > 0 ? (ntuLeft / slopePerHour) : 0;
       setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
     } else {
+      // negative or zero slope means no impending clogging based on recent trend
       setDaysToClog(null);
     }
-    // stability index: 100 - (relative std-like fraction)
-    // approximate: stability = 100 - clamp(|avgRate| / clogging threshold * 100)
-    const stability = Math.max(0, 100 - Math.min(100, Math.abs(avgRate) / thresholds.clogging * 100));
+
+    // Stability based on residual variance over the window
+    let residualSum = 0;
+    for (let i = 0; i < n; i++) {
+      const fitted = meanV + slopePerHour * (times[i] - meanT);
+      const r = values[i] - fitted;
+      residualSum += Math.abs(r);
+    }
+    const avgResidual = residualSum / n;
+    const stability = Math.max(0, 100 - Math.min(100, (avgResidual / thresholds.clogging) * 100));
     setStabilityIndex(Math.round(stability));
   }, []);
 
@@ -262,7 +317,7 @@ const Dashboard = () => {
     const highest = values.length ? Math.max(...values) : 0;
     const trend = calculateTrend(values.slice(-10));
     const alert = determineAlertLevel(latest, average, trend);
-    const risk = predictCloggingRisk(latest, average, trend, alert);
+    const risk = predictCloggingRisk(latest);
     computeAccumulationMetrics(formatted);
     computeDistribution(values);
     setTurbidityData(formatted.slice(-1000));
@@ -281,7 +336,7 @@ const Dashboard = () => {
     const highest = Math.max(...values);
     const trend = calculateTrend(values.slice(-10));
     const alert = determineAlertLevel(latest, avg, trend);
-    const risk = predictCloggingRisk(latest, avg, trend, alert);
+    const risk = predictCloggingRisk(latest);
     computeAccumulationMetrics(data);
     computeDistribution(values);
     setStats({ latest, average: Math.round(avg), highest, trend });
@@ -886,8 +941,12 @@ const Dashboard = () => {
                   <LineChart data={turbidityData.map((d, i, arr) => {
                     if (i === 0) return { time: d.time, rate: 0 };
                     const prev = arr[i - 1];
-                    const dtHours = (new Date(d.fullDate) - new Date(prev.fullDate)) / 3600000 || 1/3600;
-                    const diff = (d.value - prev.value) / dtHours;
+                    let dtHours = (new Date(d.fullDate) - new Date(prev.fullDate)) / 3600000;
+                    // Clamp to avoid division by tiny gaps; minimum 5 seconds equivalent
+                    if (!dtHours || dtHours < (5/3600)) dtHours = 5/3600;
+                    let diff = (d.value - prev.value) / dtHours;
+                    if (diff < -200) diff = -200; // cap negative display to avoid misleading extremes
+                    if (diff > thresholds.flooding) diff = thresholds.flooding;
                     return { time: d.time, rate: Number(diff.toFixed(2)) };
                   })}>
                     <CartesianGrid strokeDasharray="3 3" />
