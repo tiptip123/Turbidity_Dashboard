@@ -24,6 +24,15 @@ const Dashboard = () => {
   const [alertLevel, setAlertLevel] = useState('normal');
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [isLive, setIsLive] = useState(false);
+  const [isDark, setIsDark] = useState(() => {
+    try {
+      const v = localStorage.getItem('dashboard:isDark');
+      if (v !== null) return v === '1';
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    } catch {
+      return false;
+    }
+  });
   const [newDataAlert, setNewDataAlert] = useState(false);
   const [riskAssessment, setRiskAssessment] = useState(null);
 
@@ -46,6 +55,45 @@ const Dashboard = () => {
     statsRef.current = stats;
     turbidityDataRef.current = turbidityData;
   }, [stats, turbidityData]);
+
+  // Apply dark-mode class to <html> and persist preference
+  useEffect(() => {
+    try {
+      if (isDark) {
+        document.documentElement.classList.add('dark');
+        localStorage.setItem('dashboard:isDark', '1');
+      } else {
+        document.documentElement.classList.remove('dark');
+        localStorage.setItem('dashboard:isDark', '0');
+      }
+    } catch {
+      // ignore
+    }
+  }, [isDark]);
+
+  const toggleTheme = () => setIsDark(d => !d);
+  const handleLogout = async () => {
+    try {
+      // Sign out via Supabase Auth if available
+      if (supabase && supabase.auth && typeof supabase.auth.signOut === 'function') {
+        await supabase.auth.signOut();
+      }
+    } catch {
+      // ignore signout errors
+    }
+    // Redirect to login page using Vite base URL so deployments with a base path
+    // (for example '/Turbidity_Dashboard/') will correctly navigate to '/<base>/login'.
+    try {
+      const base = import.meta.env.BASE_URL || '/';
+      // normalize base so we don't produce double slashes
+      const normalized = base.endsWith('/') ? base.slice(0, -1) : base;
+      const loginPath = `${normalized}/login`;
+      window.location.href = loginPath;
+    } catch {
+      // Fallback to root login if import.meta is not available for any reason
+      window.location.href = '/login';
+    }
+  };
 
   // (removed: assessFloodRisk/getSedimentationLevel) — risk text is derived directly in predictCloggingRisk
 
@@ -691,6 +739,37 @@ const processSensorValue = (value) => {
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
+      {/* Top-left fixed controls: theme toggle + logout */}
+      <div className="fixed top-4 left-4 z-50 flex items-center space-x-3">
+        <button
+          onClick={toggleTheme}
+          aria-pressed={isDark}
+          aria-label="Toggle theme"
+          className={`btn btn-toggle ${isDark ? 'dark' : 'light'}`}
+          title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          <span className="icon" aria-hidden="true">
+            {isDark ? (
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" fill="currentColor"/></svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v2M12 19v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            )}
+          </span>
+          <span className="text-xs">{isDark ? 'Dark' : 'Light'}</span>
+        </button>
+
+        <button
+          onClick={handleLogout}
+          aria-label="Logout"
+          className="btn btn-logout"
+          title="Sign out"
+        >
+          <span className="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M16 17l5-5-5-5M21 12H9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><path d="M13 19H6a2 2 0 01-2-2V7a2 2 0 012-2h7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </span>
+          <span className="text-xs">Logout</span>
+        </button>
+      </div>
       <div className="max-w-7xl mx-auto">
         {/* Error Message */}
         {error && (
@@ -765,6 +844,8 @@ const processSensorValue = (value) => {
               <div className="text-xs text-gray-500">Last update: {lastUpdate.toLocaleString()}</div>
             </div>
           </div>
+
+          {/* theme toggle moved to fixed top-left controls */}
 
           <div className="flex items-center space-x-3">
             <div className="text-xs text-gray-600 mr-2">Range:</div>
