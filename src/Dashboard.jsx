@@ -5,10 +5,8 @@ import {
   BarChart, Bar
 } from 'recharts';
 
-// SIDEWALK DRAINAGE TURBIDITY THRESHOLDS
-// Aligned with ESP32 research-based thresholds for drainage systems
-// NOTE: Sensor behavior observed in field tests indicates lower raw values correspond to higher turbidity.
-// Therefore, we invert incoming raw values: NTU = 3000 - clamp(raw, 0, 3000).
+// NTU THRESHOLDS (research-based values from your ESP32 sketch)
+// These match the thresholds used on the ESP32 device for risk assessment
 const thresholds = {
   normal: 100.0,        // Clear water - normal flow
   warning: 500.0,       // Silt accumulation begins
@@ -51,7 +49,7 @@ const Dashboard = () => {
 
   // (removed: assessFloodRisk/getSedimentationLevel) — risk text is derived directly in predictCloggingRisk
 
-  // Sidewalk drainage clogging risk assessment - aligned with ESP32 thresholds
+  // Sidewalk drainage clogging risk assessment - aligned with NTU thresholds above
   const predictCloggingRisk = useCallback((latest) => {
 
     if (latest >= thresholds.flooding) {
@@ -116,51 +114,28 @@ const Dashboard = () => {
     };
   }, []);
 
-// Sensor validation - ESP32 provides raw values where lower = more turbid (muddy)
-// Field observation: clear water produces raw readings in ~2000–2097 range
-// We convert to NTU using an inverted, calibrated piecewise mapping within 0–3000 range
-  const checkSensorCalibration = (readings) => {
-    if (!readings || readings.length === 0) return false;
-    const avgReading = readings.reduce((sum, val) => sum + val.value, 0) / readings.length;
-    // Check if values are out of expected NTU range (0-3000)
-    if (avgReading > 3000 || avgReading < 0) {
-      console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected NTU value:', avgReading);
-      return true;
-    }
-    return false;
-  };
-
-// Convert sensor raw reading to NTU using inverted, calibrated mapping
-const processSensorValue = (value) => {
-  // Calibration anchors (based on field tests)
-  const RAW_CLEAR_START = 2000; // start of clear-water plateau
-  const RAW_CLEAR_END = 2097;   // end of clear-water plateau
-  const NTU_AT_CLEAR_START = 50; // low turbidity at start of plateau
-  const NTU_AT_CLEAR_END = 0;    // near-zero turbidity at end of plateau
-
-  // Clamp raw to expected range
-  let raw = value;
-  if (raw < 0) raw = 0;
-  if (raw > 3000) raw = 3000;
-
-  let ntu;
-  if (raw <= RAW_CLEAR_START) {
-    // Map [0, RAW_CLEAR_START] → [3000, NTU_AT_CLEAR_START] linearly (lower raw = more turbid)
-    const slope = (NTU_AT_CLEAR_START - 3000) / (RAW_CLEAR_START - 0); // negative
-    ntu = 3000 + slope * raw;
-  } else if (raw <= RAW_CLEAR_END) {
-    // Map [RAW_CLEAR_START, RAW_CLEAR_END] → [NTU_AT_CLEAR_START, NTU_AT_CLEAR_END]
-    const slope = (NTU_AT_CLEAR_END - NTU_AT_CLEAR_START) / (RAW_CLEAR_END - RAW_CLEAR_START);
-    ntu = NTU_AT_CLEAR_START + slope * (raw - RAW_CLEAR_START);
-  } else {
-    // Above plateau is essentially clear
-    ntu = NTU_AT_CLEAR_END;
+// Sensor validation - input to these helpers are RAW RTU values from the ESP32
+// We expect raw in roughly [0..~2100]; clear water observed around 2000-2097.
+const checkSensorCalibration = (readings) => {
+  if (!readings || readings.length === 0) return false;
+  const avgReading = readings.reduce((sum, val) => sum + Number(val.value || 0), 0) / readings.length;
+  // Incoming values are NTU (0..3000 expected). Flag if clearly out of bounds.
+  if (avgReading > 3000 || avgReading < 0) {
+    console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected NTU value:', avgReading);
+    return true;
   }
+  return false;
+};
 
-  // Final clamp and round
-  if (ntu < 0) ntu = 0;
-  if (ntu > 3000) ntu = 3000;
-  return Math.round(ntu);
+// processSensorValue: normalize incoming DB value
+// NOTE: your ESP32 sketch already converts raw ADC -> NTU and sends NTU to the DB
+// (see provided ESP32 code: body = {"value": currentNTU}). Therefore incoming `value`
+// should be treated as NTU. This function parses, clamps and rounds the NTU for UI use.
+const processSensorValue = (value) => {
+  const v = Number(value);
+  if (Number.isNaN(v)) return 0;
+  const ntu = Math.max(0, Math.min(3000, v));
+  return Math.round(ntu * 10) / 10;
 };
 
   // calculate trend helper function
@@ -199,10 +174,10 @@ const processSensorValue = (value) => {
       setStabilityIndex(100);
       return;
     }
-
-    // Use a stable window (last 10 minutes or last 20 points) to reduce noise
-    const WINDOW_MS = 10 * 60 * 1000;
-    const MAX_POINTS = 20;
+    // Use a stable window (last 30 minutes or up to 60 points) to reduce noise
+    // Larger window smooths out noisy short-term fluctuations and avoids extreme rates
+    const WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+    const MAX_POINTS = 60;
     const endIdx = formatted.length - 1;
     let startIdx = endIdx;
     const endTime = formatted[endIdx].fullDate.getTime();
@@ -215,10 +190,21 @@ const processSensorValue = (value) => {
       const slice = formatted.slice(-Math.min(6, formatted.length));
       const first = slice[0];
       const last = slice[slice.length - 1];
-      const dtHours = Math.max((last.fullDate - first.fullDate) / 3600000, 5 / 3600); // min 5 seconds equivalent
-      const rate = (last.value - first.value) / dtHours;
-      const clampedRate = Math.max(-200, Math.min(thresholds.flooding, rate));
-      setAccumulationRate(Number(clampedRate.toFixed(2)));
+      const rawDtHours = (last.fullDate - first.fullDate) / 3600000;
+      const MIN_DT_HOURS = 30 / 3600; // ignore very small intervals (30 seconds)
+      const dtHours = Math.max(rawDtHours, MIN_DT_HOURS);
+      // Prepare a clampedRate variable for downstream calculations
+      let clampedRate = 0;
+      // If the real interval is tiny (sensor just started) don't produce a spiky rate
+      if (rawDtHours < MIN_DT_HOURS) {
+        clampedRate = 0;
+        setAccumulationRate(0);
+      } else {
+        const rate = (last.value - first.value) / dtHours;
+        // Allow a wide range but clamp to a reasonably large cap to avoid infinities
+        clampedRate = Math.max(-10000, Math.min(thresholds.flooding * 2, rate));
+        setAccumulationRate(Number(clampedRate.toFixed(2)));
+      }
       const current = last.value;
       if (clampedRate > 0) {
         const ntuLeft = thresholds.clogging - current;
@@ -246,12 +232,12 @@ const processSensorValue = (value) => {
       num += dt * (values[i] - meanV);
       den += dt * dt;
     }
-    let slopePerHour = den > 0 ? (num / den) : 0; // NTU per hour
-    // Clamp to avoid unrealistic spikes; allow slower clearing than buildup to avoid confusion
-    const MAX_POS_RATE = thresholds.flooding; // up to 2500 NTU/hr accumulating
-    const MAX_NEG_RATE = -200; // at most -200 NTU/hr clearing displayed
-    if (slopePerHour > MAX_POS_RATE) slopePerHour = MAX_POS_RATE;
-    if (slopePerHour < MAX_NEG_RATE) slopePerHour = MAX_NEG_RATE;
+  let slopePerHour = den > 0 ? (num / den) : 0; // NTU per hour
+  // Clamp to avoid unrealistic infinite spikes, but allow large negative clears
+  const MAX_POS_RATE = thresholds.flooding * 2; // allow up to twice flooding threshold per hour
+  const MAX_NEG_RATE = -10000; // very large negative allowed (clearing)
+  if (slopePerHour > MAX_POS_RATE) slopePerHour = MAX_POS_RATE;
+  if (slopePerHour < MAX_NEG_RATE) slopePerHour = MAX_NEG_RATE;
 
     setAccumulationRate(Number(slopePerHour.toFixed(2)));
 
@@ -304,11 +290,11 @@ const processSensorValue = (value) => {
     const formatted = data
       .map(item => ({
         time: new Date(item.created_at).toLocaleTimeString(),
-        value: processSensorValue(item.value), // ESP32 sends NTU directly, no inversion needed
+        value: processSensorValue(item.value), // convert raw RTU -> NTU
         fullDate: new Date(item.created_at),
         date: new Date(item.created_at).toLocaleDateString(),
         id: item.id,
-        originalValue: item.value // Store original for debugging
+        originalValue: item.value // Store original raw RTU for debugging
       }))
       .reverse();
     const values = formatted.map(d => Number(d.value) || 0);
@@ -359,7 +345,7 @@ const processSensorValue = (value) => {
       if (data && data.length > 0) {
         const newDataPoints = data.map(item => ({
           time: new Date(item.created_at).toLocaleTimeString(),
-          value: processSensorValue(item.value), // ESP32 sends NTU directly
+          value: processSensorValue(item.value), // convert raw RTU -> NTU
           fullDate: new Date(item.created_at),
           date: new Date(item.created_at).toLocaleDateString(),
           id: item.id,
@@ -464,9 +450,11 @@ const processSensorValue = (value) => {
   useEffect(() => {
     fetchTurbidityData();
 
+    // Poll for new DB rows frequently so the dashboard reflects ESP32 adaptive sampling quickly.
+    // The ESP32 itself controls its sampling interval; dashboard polling is lightweight (5s).
     const intervalId = setInterval(() => {
       if (isLive) checkForNewData();
-    }, 10000);
+    }, 5000);
 
     return () => clearInterval(intervalId);
   }, [isLive, fetchTurbidityData, checkForNewData]);
@@ -669,7 +657,7 @@ const processSensorValue = (value) => {
 
           <div class="footer">
             <p>Report generated from Turbidity Dashboard | ${new Date().toLocaleString()}</p>
-            <p>Thresholds: Normal (&lt;${thresholds.normal} NTU), Warning (${thresholds.normal}-${thresholds.warning-1} NTU), High Risk (${thresholds.warning}-${thresholds.highRisk-1} NTU), Clogging (${thresholds.highRisk}-${thresholds.clogging-1} NTU), Flooding (${thresholds.clogging}+ NTU)</p>
+            <p>Thresholds: Normal (&lt;${thresholds.normal} NTU), Warning (${thresholds.normal}–${thresholds.warning} NTU), High Risk (${thresholds.warning}–${thresholds.highRisk} NTU), Clogging (${thresholds.highRisk}–${thresholds.clogging} NTU), Flooding (&gt;=${thresholds.flooding} NTU)</p>
           </div>
         </body>
       </html>
@@ -740,7 +728,7 @@ const processSensorValue = (value) => {
         )}
 
         {/* Sensor Status Notice */}
-        {checkSensorCalibration(turbidityData.length > 0 ? turbidityData.map(d => ({value: d.value})) : []) && (
+  {checkSensorCalibration(turbidityData.length > 0 ? turbidityData.map(d => ({value: d.originalValue ?? d.value})) : []) && (
           <div className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg mb-4">
             <div className="flex items-center">
               <span className="text-xl mr-2">🔧</span>
@@ -759,7 +747,10 @@ const processSensorValue = (value) => {
           <div className="flex items-center justify-between">
             <div className="flex items-center">
               <span className="mr-2">📍</span>
-              <span><strong>Monitoring:</strong> Sidewalk Drainage System | ESP32 Sensor Active | Update Frequency: 5 seconds</span>
+              <span>
+                <strong>Monitoring:</strong> Sidewalk Drainage System | ESP32 Sensor Active |
+                <span className="ml-1">Update Frequency: {riskAssessment?.samplingInterval ?? 'Adaptive (ESP32-controlled)'}</span>
+              </span>
             </div>
             <span className="text-xs bg-blue-200 px-2 py-1 rounded">Live</span>
           </div>
@@ -895,11 +886,11 @@ const processSensorValue = (value) => {
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="time" minTickGap={20} />
                     <YAxis label={{ value: 'NTU', angle: -90, position: 'insideLeft' }} />
-                    <ReferenceLine y={thresholds.normal} stroke="green" label="Normal (100)" />
-                    <ReferenceLine y={thresholds.warning} stroke="orange" label="Warning (500)" />
-                    <ReferenceLine y={thresholds.highRisk} stroke="orangered" label="High Risk (1000)" />
-                    <ReferenceLine y={thresholds.clogging} stroke="red" label="Clogging (2000)" />
-                    <ReferenceLine y={thresholds.flooding} stroke="darkred" strokeDasharray="5 5" label="Flooding (2500)" />
+                    <ReferenceLine y={thresholds.normal} stroke="green" label={`Normal (${thresholds.normal})`} />
+                    <ReferenceLine y={thresholds.warning} stroke="orange" label={`Warning (${thresholds.warning})`} />
+                    <ReferenceLine y={thresholds.highRisk} stroke="orangered" label={`High Risk (${thresholds.highRisk})`} />
+                    <ReferenceLine y={thresholds.clogging} stroke="red" label={`Clogging (${thresholds.clogging})`} />
+                    <ReferenceLine y={thresholds.flooding} stroke="darkred" strokeDasharray="5 5" label={`Flooding (${thresholds.flooding})`} />
                     <Tooltip formatter={(v) => `${v} NTU`} labelFormatter={(label, payload) => (payload && payload[0] ? payload[0].payload.fullDate.toLocaleString() : label)} />
                     <Line type="monotone" dataKey="value" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 6 }} />
                   </LineChart>
@@ -917,11 +908,11 @@ const processSensorValue = (value) => {
               <div style={{ width: '100%', height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={[
-                    { name: '0-99', count: distribution.normal },
-                    { name: '100-499', count: Math.floor(distribution.warning / 2) },
-                    { name: '500-999', count: Math.floor(distribution.warning / 2) },
-                    { name: '1000-1999', count: distribution.danger },
-                    { name: '2000+', count: distribution.critical }
+                    { name: `0-${Math.max(0, Math.floor(thresholds.normal - 1))}`, count: distribution.normal },
+                    { name: `${thresholds.normal}-${Math.max(thresholds.warning - 1, thresholds.normal)}`, count: Math.floor(distribution.warning / 2) },
+                    { name: `${thresholds.warning}-${Math.max(thresholds.highRisk - 1, thresholds.warning)}`, count: Math.floor(distribution.warning / 2) },
+                    { name: `${thresholds.highRisk}-${Math.max(thresholds.clogging - 1, thresholds.highRisk)}`, count: distribution.danger },
+                    { name: `${thresholds.clogging}+`, count: distribution.critical }
                   ]}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="name" />
@@ -945,8 +936,9 @@ const processSensorValue = (value) => {
                     // Clamp to avoid division by tiny gaps; minimum 5 seconds equivalent
                     if (!dtHours || dtHours < (5/3600)) dtHours = 5/3600;
                     let diff = (d.value - prev.value) / dtHours;
-                    if (diff < -200) diff = -200; // cap negative display to avoid misleading extremes
-                    if (diff > thresholds.flooding) diff = thresholds.flooding;
+                    // Avoid artificial -200 floor; allow larger negative (clearing) values but cap extremes
+                    if (diff < -10000) diff = -10000;
+                    if (diff > thresholds.flooding * 2) diff = thresholds.flooding * 2;
                     return { time: d.time, rate: Number(diff.toFixed(2)) };
                   })}>
                     <CartesianGrid strokeDasharray="3 3" />
