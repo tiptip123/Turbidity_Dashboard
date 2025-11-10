@@ -686,13 +686,34 @@ const processSensorValue = (value) => {
     setTimeRange(range);
   };
 
+  // Print date range state
+  const [printRange, setPrintRange] = useState({ start: null, end: null });
+  const [showPrintModal, setShowPrintModal] = useState(false);
+
   // Print records function
-  const handlePrint = () => {
+  const handlePrint = (selectedRange = null) => {
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       alert('Please allow pop-ups to print records');
       return;
     }
+
+    // Filter data by date range if provided
+    let dataToUse = [...turbidityData];
+    if (selectedRange && selectedRange.start && selectedRange.end) {
+      const startDate = new Date(selectedRange.start);
+      const endDate = new Date(selectedRange.end);
+      console.log('Filtering between:', startDate, 'and', endDate);
+      
+      dataToUse = turbidityData.filter(record => {
+        const recordDate = new Date(record.fullDate);
+        const isInRange = recordDate >= startDate && recordDate <= endDate;
+        return isInRange;
+      });
+      
+      console.log('Filtered from', turbidityData.length, 'to', dataToUse.length, 'records');
+    }
+    const filteredData = dataToUse;
 
     const printContent = `
       <!DOCTYPE html>
@@ -724,28 +745,26 @@ const processSensorValue = (value) => {
           </style>
         </head>
         <body>
-          <div class="header">
-            <h1>Sidewalk Drainage Monitoring Report</h1>
-            <p>Generated: ${new Date().toLocaleString()}</p>
-            <p>Time Range: ${timeRange.charAt(0).toUpperCase() + timeRange.slice(1)} | Total Records: ${turbidityData.length}</p>
-          </div>
-
-          <div class="summary">
+           <div class="header">
+             <h1>Sidewalk Drainage Monitoring Report</h1>
+             <p>Generated: ${new Date().toLocaleString()}</p>
+             <p>Time Range: ${selectedRange ? `${new Date(selectedRange.start).toLocaleString()} to ${new Date(selectedRange.end).toLocaleString()}` : 'All Data'} | Total Records: ${selectedRange ? filteredData.length : turbidityData.length}</p>
+           </div>          <div class="summary">
             <div class="summary-item">
               <strong>Latest Reading</strong>
-              <span>${stats.latest} NTU</span>
+              <span>${filteredData.length ? filteredData[filteredData.length - 1].value.toFixed(1) : 0} NTU</span>
             </div>
             <div class="summary-item">
               <strong>Average</strong>
-              <span>${stats.average} NTU</span>
+              <span>${filteredData.length ? (filteredData.reduce((sum, record) => sum + record.value, 0) / filteredData.length).toFixed(1) : 0} NTU</span>
             </div>
             <div class="summary-item">
               <strong>Peak</strong>
-              <span>${stats.highest} NTU</span>
+              <span>${filteredData.length ? Math.max(...filteredData.map(d => d.value)).toFixed(1) : 0} NTU</span>
             </div>
             <div class="summary-item">
               <strong>Trend</strong>
-              <span>${stats.trend}</span>
+              <span>${calculateTrend(filteredData.map(d => d.value))}</span>
             </div>
           </div>
 
@@ -790,7 +809,7 @@ const processSensorValue = (value) => {
               </tr>
             </thead>
             <tbody>
-              ${turbidityData.map((record, index) => {
+              ${filteredData.map((record, index) => {
                 let statusClass = 'status-normal';
                 let statusText = 'Clear Water';
                 if (record.value >= thresholds.flooding) {
@@ -1159,7 +1178,7 @@ const processSensorValue = (value) => {
           </button>
           
           <button 
-            onClick={handlePrint} 
+            onClick={() => setShowPrintModal(true)}
             disabled={turbidityData.length === 0}
             className="bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-medium py-3 px-8 rounded shadow inline-flex items-center"
           >
@@ -1167,6 +1186,59 @@ const processSensorValue = (value) => {
             Print Records
           </button>
         </div>
+
+        {/* Print Modal */}
+        {showPrintModal && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+            <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+              <div className="mt-3">
+                <h3 className="text-lg font-semibold">Select Date Range for Print</h3>
+                <div className="mt-4">
+                  <div className="mb-4">
+                    <label className="block text-sm text-gray-700 mb-2">Start Date & Time</label>
+                    <div className="flex space-x-2">
+                      <input
+                        type="datetime-local"
+                        className="w-full p-2 border rounded"
+                        onChange={(e) => setPrintRange(prev => ({ ...prev, start: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                  <div className="mb-4">
+                    <label className="block text-sm text-gray-700 mb-2">End Date & Time</label>
+                    <div className="flex space-x-2">
+                      <input
+                        type="datetime-local"
+                        className="w-full p-2 border rounded"
+                        onChange={(e) => setPrintRange(prev => ({ ...prev, end: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="flex justify-end space-x-3 mt-6">
+                  <button
+                    onClick={() => setShowPrintModal(false)}
+                    className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (printRange.start && printRange.end) {
+                        handlePrint(printRange);
+                        setShowPrintModal(false);
+                      }
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-blue-300"
+                    disabled={!printRange.start || !printRange.end}
+                  >
+                    Print
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
