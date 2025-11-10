@@ -167,22 +167,41 @@ const Dashboard = () => {
 const checkSensorCalibration = (readings) => {
   if (!readings || readings.length === 0) return false;
   const avgReading = readings.reduce((sum, val) => sum + Number(val.value || 0), 0) / readings.length;
-  // Incoming values are NTU (0..3000 expected). Flag if clearly out of bounds.
-  if (avgReading > 3000 || avgReading < 0) {
-    console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected NTU value:', avgReading);
+  // Flag if RTU clearly out of bounds (0..~2100 expected)
+  if (avgReading > 2500 || avgReading < 0) {
+    console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected RTU value:', avgReading);
     return true;
   }
   return false;
 };
 
-// processSensorValue: normalize incoming DB value
-// NOTE: your ESP32 sketch already converts raw ADC -> NTU and sends NTU to the DB
-// (see provided ESP32 code: body = {"value": currentNTU}). Therefore incoming `value`
-// should be treated as NTU. This function parses, clamps and rounds the NTU for UI use.
+// processSensorValue: convert raw RTU values from ESP32 sensor to NTU values
+// This uses an inverse-exponential mapping calibrated to field data:
+// - Clear water: raw RTU ≈ 2000-2097 → very low NTU (clear)
+// - Muddy water: raw RTU ≈ 6 → very high NTU
+// The mapping is: NTU = alpha / (RTU + beta) with piecewise adjustment for clear water
+// Note: if your ESP32 changes its raw RTU ranges, you'll need to recalibrate alpha/beta
 const processSensorValue = (value) => {
-  const v = Number(value);
-  if (Number.isNaN(v)) return 0;
-  const ntu = Math.max(0, Math.min(3000, v));
+  let rtu = Number(value);
+  if (Number.isNaN(rtu)) return 0;
+  
+  // Clamp RTU to valid range
+  rtu = Math.max(0, Math.min(2100, rtu));
+  
+  // Alpha and beta for inverse-exponential mapping, calibrated to field data
+  const alpha = 101734.75;
+  const beta = 34.69387755102041;
+  
+  let ntu = alpha / (rtu + beta);
+  
+  // Piecewise adjustment for clear water (2000-2097 raw → ~0-50 NTU linear mapping)
+  if (rtu >= 2000) {
+    // Linear interpolation from (2000,50) to (2097,0)
+    ntu = Math.max(0, 50 * (2097 - rtu) / (2097 - 2000));
+  }
+  
+  // Clamp final NTU and round to 0.1
+  ntu = Math.max(0, Math.min(3000, ntu));
   return Math.round(ntu * 10) / 10;
 };
 
