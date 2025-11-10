@@ -15,6 +15,20 @@ const thresholds = {
   flooding: 2500.0      // Immediate flooding risk
 };
 
+// Target school drainage configuration (provided)
+const drainageConfig = {
+  carriageway: 2.5,       // m
+  curbGutter: 0.5,        // m
+  sidewalk: 1.5,          // m
+  widthPerSide: 4.5,      // m (total per side)
+  slopeLongitudinal: 0.08, // 8% for drainage
+  crossSlope: 0.015,      // 1.5% cross-slope
+  catchBasinSpacing: 20,  // m
+  pipeDiameter: 0.11,     // m (110 mm R2PC)
+  runoffCoefficient: 0.9, // impervious
+  manningN: 0.012
+};
+
 const Dashboard = () => {
   // core data + ui
   const [turbidityData, setTurbidityData] = useState([]);
@@ -35,6 +49,50 @@ const Dashboard = () => {
   });
   const [newDataAlert, setNewDataAlert] = useState(false);
   const [riskAssessment, setRiskAssessment] = useState(null);
+
+  // Design parameters for school drainage (used throughout the dashboard)
+  const [designIntensity] = useState(50); // mm/hr default for design checks
+
+  // Helper: compute catchment area (m^2) for N sides (1 or 2)
+  const computeCatchmentArea = useCallback((sides = 1) => {
+    return drainageConfig.catchBasinSpacing * drainageConfig.widthPerSide * sides;
+  }, []);
+
+  // Helper: Rational method Q (m3/s) -> Q = C * i(mm/hr) * A(m2) / 360000
+  const computeRunoffQ = useCallback((area_m2, intensity_mm_per_hr, C = drainageConfig.runoffCoefficient) => {
+    return (C * intensity_mm_per_hr * area_m2) / 360000;
+  }, []);
+
+  // Helper: Manning full-flow capacity for circular pipe (m3/s)
+  const pipeFullFlowCapacity = useCallback((D_m, slope, n = drainageConfig.manningN) => {
+    const A = Math.PI * D_m * D_m / 4;
+    const R = D_m / 4; // hydraulic radius at full flow for full circular pipe
+    const V = (1 / n) * Math.pow(R, 2 / 3) * Math.sqrt(slope);
+    return A * V;
+  }, []);
+
+  // Evaluate drainage for current designIntensity and config
+  const evaluateDrainage = useCallback(() => {
+    const areaOneSide = computeCatchmentArea(1);
+    const areaBoth = computeCatchmentArea(2);
+    const qOne = computeRunoffQ(areaOneSide, designIntensity); // m3/s
+    const qBoth = computeRunoffQ(areaBoth, designIntensity);
+    const pipeD = drainageConfig.pipeDiameter;
+    const capSteep = pipeFullFlowCapacity(pipeD, drainageConfig.slopeLongitudinal);
+    const capConservative = pipeFullFlowCapacity(pipeD, 0.01); // 1% conservative
+
+    // recommendations
+    const results = {
+      areaOneSide,
+      areaBoth,
+      qOne,
+      qBoth,
+      capSteep,
+      capConservative,
+      designIntensity
+    };
+    return results;
+  }, [computeCatchmentArea, computeRunoffQ, pipeFullFlowCapacity, designIntensity]);
 
   // sediment analytics
   const [accumulationRate, setAccumulationRate] = useState(0); // NTU/hour
@@ -276,11 +334,38 @@ const processSensorValue = (value) => {
       if (clampedRate > 0) {
         const ntuLeft = thresholds.clogging - current;
         const hoursToClog = ntuLeft > 0 ? (ntuLeft / clampedRate) : 0;
-        setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
+        let days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
+        // Factor hydraulic capacity: if pipe is hydraulically overloaded, clogging is effectively immediate
+        try {
+          const evalD = evaluateDrainage();
+          const overloadedBoth = evalD.qBoth > evalD.capConservative;
+          const overloadedSingle = evalD.qOne > evalD.capConservative;
+          if (overloadedBoth) {
+            // Immediate risk — set days to clog to zero to surface urgency
+            days = 0;
+          } else if (overloadedSingle && days !== 0) {
+            // Single-side overload — reduce time to clog by a factor (faster buildup)
+            days = Math.min(days, Math.max(0, Number((days * 0.5).toFixed(1))));
+          }
+        } catch {
+          // ignore evaluation errors and keep calculated days
+        }
+        setDaysToClog(days);
       } else {
         setDaysToClog(null);
       }
-      const stability = Math.max(0, 100 - Math.min(100, Math.abs(clampedRate) / thresholds.clogging * 100));
+      // Stability reduced if hydraulically overloaded
+      let stability = Math.max(0, 100 - Math.min(100, Math.abs(clampedRate) / thresholds.clogging * 100));
+      try {
+        const evalD2 = evaluateDrainage();
+        if (evalD2.qBoth > evalD2.capConservative) {
+          stability = Math.max(0, stability - 40); // penalize stability when overloaded
+        } else if (evalD2.qOne > evalD2.capConservative) {
+          stability = Math.max(0, stability - 15);
+        }
+      } catch {
+        // ignore
+      }
       setStabilityIndex(Math.round(stability));
       return;
     }
@@ -312,7 +397,19 @@ const processSensorValue = (value) => {
     if (slopePerHour > 0) {
       const ntuLeft = thresholds.clogging - current;
       const hoursToClog = ntuLeft > 0 ? (ntuLeft / slopePerHour) : 0;
-      setDaysToClog(hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0);
+      let days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
+      // Consider hydraulic capacity: if overloaded, escalate time-to-clog
+      try {
+        const evalD = evaluateDrainage();
+        if (evalD.qBoth > evalD.capConservative) {
+          days = 0;
+        } else if (evalD.qOne > evalD.capConservative) {
+          days = Math.min(days, Math.max(0, Number((days * 0.6).toFixed(1))));
+        }
+      } catch {
+        // ignore
+      }
+      setDaysToClog(days);
     } else {
       // negative or zero slope means no impending clogging based on recent trend
       setDaysToClog(null);
@@ -328,7 +425,7 @@ const processSensorValue = (value) => {
     const avgResidual = residualSum / n;
     const stability = Math.max(0, 100 - Math.min(100, (avgResidual / thresholds.clogging) * 100));
     setStabilityIndex(Math.round(stability));
-  }, []);
+  }, [evaluateDrainage]);
 
   const computeDistribution = useCallback((values) => {
     const bins = { normal: 0, warning: 0, highRisk: 0, clogging: 0, flooding: 0 };
