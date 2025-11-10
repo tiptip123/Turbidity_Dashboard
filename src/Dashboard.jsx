@@ -561,8 +561,12 @@ const processSensorValue = (value) => {
       const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
       return (query) => query.gte('created_at', start);
     }
-    const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    return (query) => query.gte('created_at', start);
+    if (timeRange === 'month') {
+      const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      return (query) => query.gte('created_at', start);
+    }
+    // 'all' case - return query without any date filter
+    return (query) => query;
   }, [timeRange]);
 
   // fetch data (with time filter)
@@ -988,6 +992,7 @@ const processSensorValue = (value) => {
               <button onClick={() => onTimeRangeChange('today')} className={`px-3 py-1 rounded ${timeRange === 'today' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Today</button>
               <button onClick={() => onTimeRangeChange('week')} className={`px-3 py-1 rounded ${timeRange === 'week' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Week</button>
               <button onClick={() => onTimeRangeChange('month')} className={`px-3 py-1 rounded ${timeRange === 'month' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Month</button>
+              <button onClick={() => onTimeRangeChange('all')} className={`px-3 py-1 rounded ${timeRange === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>All</button>
             </div>
 
             <div className="text-xs bg-gray-200 px-2 py-1 rounded">Raw: {turbidityData[turbidityData.length - 1]?.originalValue ?? stats.latest} </div>
