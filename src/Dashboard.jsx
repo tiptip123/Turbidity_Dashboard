@@ -76,25 +76,16 @@ const Dashboard = ({ isAdmin = false }) => {
   const toggleTheme = () => setIsDark(d => !d);
   const handleLogout = async () => {
     try {
-      // Sign out via Supabase Auth if available
+      // Sign out via Supabase Auth
       if (supabase && supabase.auth && typeof supabase.auth.signOut === 'function') {
         await supabase.auth.signOut();
       }
-    } catch {
-      // ignore signout errors
+    } catch (error) {
+      console.error('Error during logout:', error);
     }
-    // Redirect to login page using Vite base URL so deployments with a base path
-    // (for example '/Turbidity_Dashboard/') will correctly navigate to '/<base>/login'.
-    try {
-      const base = import.meta.env.BASE_URL || '/';
-      // normalize base so we don't produce double slashes
-      const normalized = base.endsWith('/') ? base.slice(0, -1) : base;
-      const loginPath = `${normalized}/login`;
-      window.location.href = loginPath;
-    } catch {
-      // Fallback to root login if import.meta is not available for any reason
-      window.location.href = '/login';
-    }
+    // Reload the page to clear state and return to login
+    // This works correctly with GitHub Pages and the base URL configuration
+    window.location.href = import.meta.env.BASE_URL || '/';
   };
 
   // (removed: assessFloodRisk/getSedimentationLevel) — risk text is derived directly in predictCloggingRisk
