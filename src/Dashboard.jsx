@@ -15,19 +15,7 @@ const thresholds = {
   flooding: 2500.0      // Immediate flooding risk
 };
 
-// Target school drainage configuration (provided)
-const drainageConfig = {
-  carriageway: 2.5,       // m
-  curbGutter: 0.5,        // m
-  sidewalk: 1.5,          // m
-  widthPerSide: 4.5,      // m (total per side)
-  slopeLongitudinal: 0.08, // 8% for drainage
-  crossSlope: 0.015,      // 1.5% cross-slope
-  catchBasinSpacing: 20,  // m
-  pipeDiameter: 0.11,     // m (110 mm R2PC)
-  runoffCoefficient: 0.9, // impervious
-  manningN: 0.012
-};
+
 
 const Dashboard = () => {
   // core data + ui
@@ -49,50 +37,6 @@ const Dashboard = () => {
   });
   const [newDataAlert, setNewDataAlert] = useState(false);
   const [riskAssessment, setRiskAssessment] = useState(null);
-
-  // Design parameters for school drainage (used throughout the dashboard)
-  const [designIntensity] = useState(50); // mm/hr default for design checks
-
-  // Helper: compute catchment area (m^2) for N sides (1 or 2)
-  const computeCatchmentArea = useCallback((sides = 1) => {
-    return drainageConfig.catchBasinSpacing * drainageConfig.widthPerSide * sides;
-  }, []);
-
-  // Helper: Rational method Q (m3/s) -> Q = C * i(mm/hr) * A(m2) / 360000
-  const computeRunoffQ = useCallback((area_m2, intensity_mm_per_hr, C = drainageConfig.runoffCoefficient) => {
-    return (C * intensity_mm_per_hr * area_m2) / 360000;
-  }, []);
-
-  // Helper: Manning full-flow capacity for circular pipe (m3/s)
-  const pipeFullFlowCapacity = useCallback((D_m, slope, n = drainageConfig.manningN) => {
-    const A = Math.PI * D_m * D_m / 4;
-    const R = D_m / 4; // hydraulic radius at full flow for full circular pipe
-    const V = (1 / n) * Math.pow(R, 2 / 3) * Math.sqrt(slope);
-    return A * V;
-  }, []);
-
-  // Evaluate drainage for current designIntensity and config
-  const evaluateDrainage = useCallback(() => {
-    const areaOneSide = computeCatchmentArea(1);
-    const areaBoth = computeCatchmentArea(2);
-    const qOne = computeRunoffQ(areaOneSide, designIntensity); // m3/s
-    const qBoth = computeRunoffQ(areaBoth, designIntensity);
-    const pipeD = drainageConfig.pipeDiameter;
-    const capSteep = pipeFullFlowCapacity(pipeD, drainageConfig.slopeLongitudinal);
-    const capConservative = pipeFullFlowCapacity(pipeD, 0.01); // 1% conservative
-
-    // recommendations
-    const results = {
-      areaOneSide,
-      areaBoth,
-      qOne,
-      qBoth,
-      capSteep,
-      capConservative,
-      designIntensity
-    };
-    return results;
-  }, [computeCatchmentArea, computeRunoffQ, pipeFullFlowCapacity, designIntensity]);
 
   // sediment analytics
   const [accumulationRate, setAccumulationRate] = useState(0); // NTU/hour
@@ -155,7 +99,7 @@ const Dashboard = () => {
 
   // (removed: assessFloodRisk/getSedimentationLevel) — risk text is derived directly in predictCloggingRisk
 
-  // Sidewalk drainage clogging risk assessment - aligned with NTU thresholds above
+  // Sediment clogging risk assessment - aligned with NTU thresholds above
   const predictCloggingRisk = useCallback((latest) => {
 
     if (latest >= thresholds.flooding) {
@@ -300,7 +244,6 @@ const processSensorValue = (value) => {
       return;
     }
     // Use a stable window (last 30 minutes or up to 60 points) to reduce noise
-    // Larger window smooths out noisy short-term fluctuations and avoids extreme rates
     const WINDOW_MS = 30 * 60 * 1000; // 30 minutes
     const MAX_POINTS = 60;
     const endIdx = formatted.length - 1;
@@ -311,22 +254,18 @@ const processSensorValue = (value) => {
     }
     const windowData = formatted.slice(startIdx, endIdx + 1);
     if (windowData.length < 2) {
-      // fallback to last few points
       const slice = formatted.slice(-Math.min(6, formatted.length));
       const first = slice[0];
       const last = slice[slice.length - 1];
       const rawDtHours = (last.fullDate - first.fullDate) / 3600000;
-      const MIN_DT_HOURS = 30 / 3600; // ignore very small intervals (30 seconds)
+      const MIN_DT_HOURS = 30 / 3600;
       const dtHours = Math.max(rawDtHours, MIN_DT_HOURS);
-      // Prepare a clampedRate variable for downstream calculations
       let clampedRate = 0;
-      // If the real interval is tiny (sensor just started) don't produce a spiky rate
       if (rawDtHours < MIN_DT_HOURS) {
         clampedRate = 0;
         setAccumulationRate(0);
       } else {
         const rate = (last.value - first.value) / dtHours;
-        // Allow a wide range but clamp to a reasonably large cap to avoid infinities
         clampedRate = Math.max(-10000, Math.min(thresholds.flooding * 2, rate));
         setAccumulationRate(Number(clampedRate.toFixed(2)));
       }
@@ -334,45 +273,20 @@ const processSensorValue = (value) => {
       if (clampedRate > 0) {
         const ntuLeft = thresholds.clogging - current;
         const hoursToClog = ntuLeft > 0 ? (ntuLeft / clampedRate) : 0;
-        let days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
-        // Factor hydraulic capacity: if pipe is hydraulically overloaded, clogging is effectively immediate
-        try {
-          const evalD = evaluateDrainage();
-          const overloadedBoth = evalD.qBoth > evalD.capConservative;
-          const overloadedSingle = evalD.qOne > evalD.capConservative;
-          if (overloadedBoth) {
-            // Immediate risk — set days to clog to zero to surface urgency
-            days = 0;
-          } else if (overloadedSingle && days !== 0) {
-            // Single-side overload — reduce time to clog by a factor (faster buildup)
-            days = Math.min(days, Math.max(0, Number((days * 0.5).toFixed(1))));
-          }
-        } catch {
-          // ignore evaluation errors and keep calculated days
-        }
+        const days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
         setDaysToClog(days);
       } else {
         setDaysToClog(null);
       }
-      // Stability reduced if hydraulically overloaded
+      // Stability based on rate of change
       let stability = Math.max(0, 100 - Math.min(100, Math.abs(clampedRate) / thresholds.clogging * 100));
-      try {
-        const evalD2 = evaluateDrainage();
-        if (evalD2.qBoth > evalD2.capConservative) {
-          stability = Math.max(0, stability - 40); // penalize stability when overloaded
-        } else if (evalD2.qOne > evalD2.capConservative) {
-          stability = Math.max(0, stability - 15);
-        }
-      } catch {
-        // ignore
-      }
       setStabilityIndex(Math.round(stability));
       return;
     }
 
     // Compute slope via simple least squares (value vs time hours)
     const t0 = windowData[0].fullDate.getTime();
-    const times = windowData.map(d => (d.fullDate.getTime() - t0) / 3600000); // hours since t0
+    const times = windowData.map(d => (d.fullDate.getTime() - t0) / 3600000);
     const values = windowData.map(d => d.value);
     const n = values.length;
     const meanT = times.reduce((a, b) => a + b, 0) / n;
@@ -384,12 +298,11 @@ const processSensorValue = (value) => {
       num += dt * (values[i] - meanV);
       den += dt * dt;
     }
-  let slopePerHour = den > 0 ? (num / den) : 0; // NTU per hour
-  // Clamp to avoid unrealistic infinite spikes, but allow large negative clears
-  const MAX_POS_RATE = thresholds.flooding * 2; // allow up to twice flooding threshold per hour
-  const MAX_NEG_RATE = -10000; // very large negative allowed (clearing)
-  if (slopePerHour > MAX_POS_RATE) slopePerHour = MAX_POS_RATE;
-  if (slopePerHour < MAX_NEG_RATE) slopePerHour = MAX_NEG_RATE;
+    let slopePerHour = den > 0 ? (num / den) : 0;
+    const MAX_POS_RATE = thresholds.flooding * 2;
+    const MAX_NEG_RATE = -10000;
+    if (slopePerHour > MAX_POS_RATE) slopePerHour = MAX_POS_RATE;
+    if (slopePerHour < MAX_NEG_RATE) slopePerHour = MAX_NEG_RATE;
 
     setAccumulationRate(Number(slopePerHour.toFixed(2)));
 
@@ -397,25 +310,13 @@ const processSensorValue = (value) => {
     if (slopePerHour > 0) {
       const ntuLeft = thresholds.clogging - current;
       const hoursToClog = ntuLeft > 0 ? (ntuLeft / slopePerHour) : 0;
-      let days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
-      // Consider hydraulic capacity: if overloaded, escalate time-to-clog
-      try {
-        const evalD = evaluateDrainage();
-        if (evalD.qBoth > evalD.capConservative) {
-          days = 0;
-        } else if (evalD.qOne > evalD.capConservative) {
-          days = Math.min(days, Math.max(0, Number((days * 0.6).toFixed(1))));
-        }
-      } catch {
-        // ignore
-      }
+      const days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
       setDaysToClog(days);
     } else {
-      // negative or zero slope means no impending clogging based on recent trend
       setDaysToClog(null);
     }
 
-    // Stability based on residual variance over the window
+    // Stability based on residual variance
     let residualSum = 0;
     for (let i = 0; i < n; i++) {
       const fitted = meanV + slopePerHour * (times[i] - meanT);
@@ -425,7 +326,7 @@ const processSensorValue = (value) => {
     const avgResidual = residualSum / n;
     const stability = Math.max(0, 100 - Math.min(100, (avgResidual / thresholds.clogging) * 100));
     setStabilityIndex(Math.round(stability));
-  }, [evaluateDrainage]);
+  }, []);
 
   const computeDistribution = useCallback((values) => {
     const bins = { normal: 0, warning: 0, highRisk: 0, clogging: 0, flooding: 0 };
@@ -630,7 +531,7 @@ const processSensorValue = (value) => {
   // small helpers - aligned with ESP32 thresholds
   const getAlertConfig = (level) => {
     const configs = {
-      normal: { color: 'green', icon: '✅', message: 'Clear Water - Normal sidewalk drainage flow', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
+      normal: { color: 'green', icon: '✅', message: 'Clear Water - Normal sediment levels', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
       warning: { color: 'yellow', icon: '🔸', message: 'Light Sediment - Silt accumulation begins', bgColor: 'bg-yellow-100', borderColor: 'border-yellow-400', textColor: 'text-yellow-800' },
       highRisk: { color: 'orange', icon: '🔶', message: 'Moderate Sediment - Significant sedimentation risk', bgColor: 'bg-orange-100', borderColor: 'border-orange-400', textColor: 'text-orange-800' },
       clogging: { color: 'red', icon: '🚨', message: 'Heavy Sediment - High probability of clogging', bgColor: 'bg-red-100', borderColor: 'border-red-400', textColor: 'text-red-800' },
@@ -659,9 +560,9 @@ const processSensorValue = (value) => {
 
   const toggleLiveUpdates = () => setIsLive(!isLive);
 
-  // build insight summary for sidewalk drainage - aligned with ESP32 logic
+  // build insight summary for sediment monitoring - aligned with ESP32 logic
   const buildInsight = () => {
-    if (!turbidityData || turbidityData.length < 2) return 'Collecting initial data from sidewalk drainage sensor...';
+    if (!turbidityData || turbidityData.length < 2) return 'Collecting initial data from sediment sensor...';
     const rate = accumulationRate;
     const floodRisk = riskAssessment?.floodRisk || 'UNKNOWN';
     const sedimentLevel = riskAssessment?.sedimentLevel || 'UNKNOWN';
@@ -750,7 +651,7 @@ const processSensorValue = (value) => {
         </head>
         <body>
            <div class="header">
-             <h1>Sidewalk Drainage Monitoring Report</h1>
+             <h1>Sediment Monitoring Report</h1>
              <p>Generated: ${new Date().toLocaleString()}</p>
              <p>Time Range: ${selectedRange ? `${new Date(selectedRange.start).toLocaleString()} to ${new Date(selectedRange.end).toLocaleString()}` : 'All Data'} | Total Records: ${selectedRange ? filteredData.length : turbidityData.length}</p>
            </div>          <div class="summary">
@@ -867,7 +768,7 @@ const processSensorValue = (value) => {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="text-xl text-gray-600 mb-2">Loading Sidewalk Drainage Monitoring System...</div>
+          <div className="text-xl text-gray-600 mb-2">Loading Sediment Monitoring System...</div>
           <div className="text-sm text-gray-500">Connecting to ESP32 sensor...</div>
         </div>
       </div>
@@ -966,7 +867,7 @@ const processSensorValue = (value) => {
             <div className="flex items-center">
               <span className="mr-2">📍</span>
               <span>
-                <strong>Monitoring:</strong> Sidewalk Drainage System | ESP32 Sensor Active |
+                <strong>Monitoring:</strong> Sediment Accumulation | ESP32 Sensor Active |
                 <span className="ml-1">Update Frequency: {riskAssessment?.samplingInterval ?? 'Adaptive (ESP32-controlled)'}</span>
               </span>
             </div>
@@ -1036,8 +937,8 @@ const processSensorValue = (value) => {
           </div>
         </div>
 
-        <h1 className="text-3xl font-semibold text-gray-800 mb-2">Sidewalk Drainage Monitoring System</h1>
-        <p className="text-gray-600 mb-6">Real-time turbidity monitoring for urban sidewalk drainage infrastructure</p>
+        <h1 className="text-3xl font-semibold text-gray-800 mb-2">Sediment Monitoring System</h1>
+        <p className="text-gray-600 mb-6">Real-time turbidity monitoring for sediment accumulation tracking</p>
 
         {/* Main Stats */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
@@ -1099,7 +1000,7 @@ const processSensorValue = (value) => {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
           {/* Timeline */}
           <div className="bg-white p-6 rounded shadow">
-            <h3 className="text-lg font-semibold mb-4">Sidewalk Drainage Turbidity Timeline</h3>
+            <h3 className="text-lg font-semibold mb-4">Sediment Turbidity Timeline</h3>
             {turbidityData.length > 0 ? (
               <div style={{ width: '100%', height: 360 }}>
                 <ResponsiveContainer width="100%" height="100%">
@@ -1143,7 +1044,7 @@ const processSensorValue = (value) => {
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-              <div className="text-xs text-gray-500 mt-2">Distribution of readings showing debris levels in sidewalk drainage.</div>
+              <div className="text-xs text-gray-500 mt-2">Distribution of readings showing sediment levels in the water.</div>
             </div>
 
             <div className="bg-white p-6 rounded shadow">
