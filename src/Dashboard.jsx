@@ -625,7 +625,7 @@ const processSensorValue = (value) => {
     }, 5000);
 
     return () => clearInterval(intervalId);
-  }, [isLive, fetchTurbidityData, checkForNewData]);
+  }, [isLive, timeRange, fetchTurbidityData, checkForNewData]);
 
   // small helpers - aligned with ESP32 thresholds
   const getAlertConfig = (level) => {
