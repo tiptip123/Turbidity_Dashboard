@@ -9,12 +9,14 @@ const ADMIN_CREDENTIALS = {
   password: '123456'
 }
 
-function Login({ onAdminLogin }) {
+function Login({ onAdminLogin, authError, recoveryMode = false }) {
   const [loginMode, setLoginMode] = useState('user') // 'user' or 'admin'
   const [adminUsername, setAdminUsername] = useState('')
   const [adminPassword, setAdminPassword] = useState('')
   const [adminError, setAdminError] = useState('')
   const [adminLoading, setAdminLoading] = useState(false)
+  // We rely on Supabase Auth UI's built-in password recovery.
+  // No local `userView` toggle is needed to avoid duplicate "Forgot password" links.
 
   const handleAdminLogin = async (e) => {
     e.preventDefault()
@@ -77,11 +79,19 @@ function Login({ onAdminLogin }) {
         {loginMode === 'user' && (
           <div className="mb-6">
             <h2 className="text-lg font-semibold text-center text-gray-700 mb-4">User Dashboard Access</h2>
+            {authError && (
+              <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-800 rounded-lg text-sm">
+                {authError}
+              </div>
+            )}
+            {/* Use Supabase Auth UI directly. Its built-in "Forgot password" UI will be shown once the user selects it.
+                Removing the custom toggle avoids duplicate links and keeps the Supabase flow as the single functional
+                password-recovery method. */}
             <Auth
               supabaseClient={supabase}
               appearance={{ theme: ThemeSupa }}
               providers={[]}
-              view="sign_in"
+              view={recoveryMode ? 'update_password' : 'sign_in'}
             />
           </div>
         )}
