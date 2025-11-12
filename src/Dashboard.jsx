@@ -15,8 +15,6 @@ const thresholds = {
   flooding: 2500.0      // Immediate flooding risk
 };
 
-
-
 const Dashboard = ({ isAdmin = false }) => {
   // core data + ui
   const [turbidityData, setTurbidityData] = useState([]);
@@ -88,11 +86,8 @@ const Dashboard = ({ isAdmin = false }) => {
     window.location.href = import.meta.env.BASE_URL || '/';
   };
 
-  // (removed: assessFloodRisk/getSedimentationLevel) — risk text is derived directly in predictCloggingRisk
-
   // Sediment clogging risk assessment - aligned with NTU thresholds above
   const predictCloggingRisk = useCallback((latest) => {
-
     if (latest >= thresholds.flooding) {
       return {
         risk: 'EXTREME',
@@ -155,48 +150,90 @@ const Dashboard = ({ isAdmin = false }) => {
     };
   }, []);
 
-// Sensor validation - input to these helpers are RAW RTU values from the ESP32
-// We expect raw in roughly [0..~2100]; clear water observed around 2000-2097.
-const checkSensorCalibration = (readings) => {
-  if (!readings || readings.length === 0) return false;
-  const avgReading = readings.reduce((sum, val) => sum + Number(val.value || 0), 0) / readings.length;
-  // Flag if RTU clearly out of bounds (0..~2100 expected)
-  if (avgReading > 2500 || avgReading < 0) {
-    console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected RTU value:', avgReading);
-    return true;
-  }
-  return false;
-};
+  // ✅ CORRECTED: Sensor validation - based on ESP32 calibration
+  const checkSensorCalibration = (readings) => {
+    if (!readings || readings.length === 0) return false;
+    
+    // Check if we have raw_value data
+    const hasRawValues = readings.some(item => item.raw_value !== undefined && item.raw_value !== null);
+    
+    if (hasRawValues) {
+      const avgRawValue = readings.reduce((sum, val) => sum + Number(val.raw_value || 0), 0) / readings.length;
+      // Flag if raw_value out of expected ESP32 ADC range (0-4095)
+      if (avgRawValue > 4095 || avgRawValue < 0) {
+        console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected raw_value:', avgRawValue);
+        return true;
+      }
+    }
+    
+    return false;
+  };
 
-// processSensorValue: convert raw RTU values from ESP32 sensor to NTU values
-// This uses an inverse-exponential mapping calibrated to field data:
-// - Clear water: raw RTU ≈ 2000-2097 → very low NTU (clear)
-// - Muddy water: raw RTU ≈ 6 → very high NTU
-// The mapping is: NTU = alpha / (RTU + beta) with piecewise adjustment for clear water
-// Note: if your ESP32 changes its raw RTU ranges, you'll need to recalibrate alpha/beta
-const processSensorValue = (value) => {
-  let rtu = Number(value);
-  if (Number.isNaN(rtu)) return 0;
-  
-  // Clamp RTU to valid range
-  rtu = Math.max(0, Math.min(2100, rtu));
-  
-  // Alpha and beta for inverse-exponential mapping, calibrated to field data
-  const alpha = 101734.75;
-  const beta = 34.69387755102041;
-  
-  let ntu = alpha / (rtu + beta);
-  
-  // Piecewise adjustment for clear water (2000-2097 raw → ~0-50 NTU linear mapping)
-  if (rtu >= 2000) {
-    // Linear interpolation from (2000,50) to (2097,0)
-    ntu = Math.max(0, 50 * (2097 - rtu) / (2097 - 2000));
-  }
-  
-  // Clamp final NTU and round to 0.1
-  ntu = Math.max(0, Math.min(3000, ntu));
-  return Math.round(ntu * 10) / 10;
-};
+  // ✅ CORRECTED: Convert raw sensor value to NTU using ESP32 calibration
+  const convertRawToNTU = (rawValue) => {
+    let raw = Number(rawValue);
+    if (Number.isNaN(raw)) return 0;
+
+    // Clamp input to ESP32 expected range (same as ESP32 code)
+    if (raw < 6) raw = 6;
+    if (raw > 2097) raw = 2097;
+
+    // Linear mapping equivalent to Arduino map() but returning float
+    const linearMap = (x, inMin, inMax, outMin, outMax) => {
+      if (inMax === inMin) return outMin;
+      const t = (x - inMin) / (inMax - inMin);
+      return outMin + t * (outMax - outMin);
+    };
+
+    let ntu;
+    if (raw >= 2000) {
+      // Clear water range: raw 2000-2097 -> NTU 50-0
+      ntu = linearMap(raw, 2000, 2097, 50, 0);
+    } else {
+      // Sediment range: raw 6-2000 -> NTU 3000-50
+      ntu = linearMap(raw, 6, 2000, 3000, 50);
+    }
+
+    // Clamp final NTU and round to one decimal place
+    if (ntu < 0) ntu = 0;
+    if (ntu > 3000) ntu = 3000;
+    return Math.round(ntu * 10) / 10;
+  };
+
+  // ✅ CORRECTED: Process sensor value - use ntu_value if available, otherwise convert from raw_value
+  const processSensorValue = (item) => {
+    // Prefer ntu_value if available (already converted on ESP32)
+    if (item.ntu_value !== undefined && item.ntu_value !== null) {
+      return Number(item.ntu_value);
+    }
+    
+    // If we have raw_value, convert it using ESP32 calibration
+    if (item.raw_value !== undefined && item.raw_value !== null) {
+      return convertRawToNTU(item.raw_value);
+    }
+    
+    // Fallback to value field (should be NTU from ESP32)
+    if (item.value !== undefined && item.value !== null) {
+      return Number(item.value);
+    }
+    
+    return 0;
+  };
+
+  // Get raw sensor value for display
+  const getRawSensorValue = (item) => {
+    // Prefer raw_value field from ESP32
+    if (item.raw_value !== undefined && item.raw_value !== null) {
+      return Number(item.raw_value);
+    }
+    
+    // Fallback to originalValue for backward compatibility
+    if (item.originalValue !== undefined && item.originalValue !== null) {
+      return Number(item.originalValue);
+    }
+    
+    return null;
+  };
 
   // calculate trend helper function
   const calculateTrend = (values) => {
@@ -234,16 +271,22 @@ const processSensorValue = (value) => {
       setStabilityIndex(100);
       return;
     }
+
     // Use a stable window (last 30 minutes or up to 60 points) to reduce noise
     const WINDOW_MS = 30 * 60 * 1000; // 30 minutes
     const MAX_POINTS = 60;
     const endIdx = formatted.length - 1;
     let startIdx = endIdx;
     const endTime = formatted[endIdx].fullDate.getTime();
-    while (startIdx > 0 && (endTime - formatted[startIdx - 1].fullDate.getTime()) <= WINDOW_MS && (endIdx - (startIdx - 1)) <= MAX_POINTS) {
+    
+    while (startIdx > 0 && 
+           (endTime - formatted[startIdx - 1].fullDate.getTime()) <= WINDOW_MS && 
+           (endIdx - (startIdx - 1)) <= MAX_POINTS) {
       startIdx--;
     }
+    
     const windowData = formatted.slice(startIdx, endIdx + 1);
+    
     if (windowData.length < 2) {
       const slice = formatted.slice(-Math.min(6, formatted.length));
       const first = slice[0];
@@ -251,16 +294,18 @@ const processSensorValue = (value) => {
       const rawDtHours = (last.fullDate - first.fullDate) / 3600000;
       const MIN_DT_HOURS = 30 / 3600;
       const dtHours = Math.max(rawDtHours, MIN_DT_HOURS);
+      
       let clampedRate = 0;
       if (rawDtHours < MIN_DT_HOURS) {
         clampedRate = 0;
         setAccumulationRate(0);
       } else {
-        const rate = (last.value - first.value) / dtHours;
+        const rate = (last.ntuValue - first.ntuValue) / dtHours;
         clampedRate = Math.max(-10000, Math.min(thresholds.flooding * 2, rate));
         setAccumulationRate(Number(clampedRate.toFixed(2)));
       }
-      const current = last.value;
+      
+      const current = last.ntuValue;
       if (clampedRate > 0) {
         const ntuLeft = thresholds.clogging - current;
         const hoursToClog = ntuLeft > 0 ? (ntuLeft / clampedRate) : 0;
@@ -269,6 +314,7 @@ const processSensorValue = (value) => {
       } else {
         setDaysToClog(null);
       }
+      
       // Stability based on rate of change
       let stability = Math.max(0, 100 - Math.min(100, Math.abs(clampedRate) / thresholds.clogging * 100));
       setStabilityIndex(Math.round(stability));
@@ -278,10 +324,11 @@ const processSensorValue = (value) => {
     // Compute slope via simple least squares (value vs time hours)
     const t0 = windowData[0].fullDate.getTime();
     const times = windowData.map(d => (d.fullDate.getTime() - t0) / 3600000);
-    const values = windowData.map(d => d.value);
+    const values = windowData.map(d => d.ntuValue);
     const n = values.length;
     const meanT = times.reduce((a, b) => a + b, 0) / n;
     const meanV = values.reduce((a, b) => a + b, 0) / n;
+    
     let num = 0;
     let den = 0;
     for (let i = 0; i < n; i++) {
@@ -289,6 +336,7 @@ const processSensorValue = (value) => {
       num += dt * (values[i] - meanV);
       den += dt * dt;
     }
+    
     let slopePerHour = den > 0 ? (num / den) : 0;
     const MAX_POS_RATE = thresholds.flooding * 2;
     const MAX_NEG_RATE = -10000;
@@ -297,7 +345,7 @@ const processSensorValue = (value) => {
 
     setAccumulationRate(Number(slopePerHour.toFixed(2)));
 
-    const current = windowData[windowData.length - 1].value;
+    const current = windowData[windowData.length - 1].ntuValue;
     if (slopePerHour > 0) {
       const ntuLeft = thresholds.clogging - current;
       const hoursToClog = ntuLeft > 0 ? (ntuLeft / slopePerHour) : 0;
@@ -341,19 +389,22 @@ const processSensorValue = (value) => {
     });
   }, []);
 
-  // main process function — transforms and calculates analytics
+  // ✅ CORRECTED: main process function — uses proper NTU conversion
   const processTurbidityData = useCallback((data) => {
     const formatted = data
       .map(item => ({
         time: new Date(item.created_at).toLocaleTimeString(),
-        value: processSensorValue(item.value), // convert raw RTU -> NTU
+        value: processSensorValue(item), // Use proper NTU conversion
+        ntuValue: processSensorValue(item), // Store NTU value separately
         fullDate: new Date(item.created_at),
         date: new Date(item.created_at).toLocaleDateString(),
         id: item.id,
-        originalValue: item.value // Store original raw RTU for debugging
+        rawValue: getRawSensorValue(item), // Store raw sensor value
+        originalValue: getRawSensorValue(item) // Backward compatibility
       }))
       .reverse();
-    const values = formatted.map(d => Number(d.value) || 0);
+    
+    const values = formatted.map(d => Number(d.ntuValue) || 0);
     const latest = values.length ? values[values.length - 1] : 0;
     const average = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
     const highest = values.length ? Math.max(...values) : 0;
@@ -372,7 +423,7 @@ const processSensorValue = (value) => {
   // incremental update for small inserts
   const updateStatsIncrementally = useCallback((data) => {
     if (!data || data.length === 0) return;
-    const values = data.map(d => Number(d.value) || 0);
+    const values = data.map(d => Number(d.ntuValue) || 0);
     const latest = values[values.length - 1];
     const avg = values.reduce((a, b) => a + b, 0) / values.length;
     const highest = Math.max(...values);
@@ -386,12 +437,12 @@ const processSensorValue = (value) => {
     setRiskAssessment(risk);
   }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk]);
 
-  // fetch only new rows since last id
+  // ✅ UPDATED: fetch only new rows since last id
   const fetchNewData = useCallback(async (sinceId) => {
     try {
       const { data, error } = await supabase
         .from('turbidity_readings')
-        .select('id, value, created_at')
+        .select('id, value, raw_value, ntu_value, created_at')
         .gt('id', sinceId)
         .order('id', { ascending: true });
       if (error) {
@@ -401,11 +452,13 @@ const processSensorValue = (value) => {
       if (data && data.length > 0) {
         const newDataPoints = data.map(item => ({
           time: new Date(item.created_at).toLocaleTimeString(),
-          value: processSensorValue(item.value), // convert raw RTU -> NTU
+          value: processSensorValue(item), // Use proper NTU conversion
+          ntuValue: processSensorValue(item), // Store NTU value
           fullDate: new Date(item.created_at),
           date: new Date(item.created_at).toLocaleDateString(),
           id: item.id,
-          originalValue: item.value
+          rawValue: item.raw_value, // Store raw_value from ESP32
+          originalValue: item.raw_value // Backward compatibility
         }));
         lastDataId.current = data[data.length - 1].id;
         const updatedData = [...turbidityDataRef.current, ...newDataPoints].slice(-1000);
@@ -461,7 +514,7 @@ const processSensorValue = (value) => {
     return (query) => query;
   }, [timeRange]);
 
-  // fetch data (with time filter)
+  // ✅ UPDATED: fetch data (with time filter) - includes new fields
   const fetchTurbidityData = useCallback(async () => {
     try {
       setLoading(true);
@@ -469,7 +522,7 @@ const processSensorValue = (value) => {
 
       let query = supabase
         .from('turbidity_readings')
-        .select('id, value, created_at')
+        .select('id, value, raw_value, ntu_value, created_at')
         .order('created_at', { ascending: false })
         .limit(1000); // fetch up to 1000 for range aggregation
 
@@ -699,8 +752,8 @@ const processSensorValue = (value) => {
               <tr>
                 <th>#</th>
                 <th>Date & Time</th>
-                <th>Value (NTU)</th>
-                <th>Raw Value</th>
+                <th>NTU Value</th>
+                <th>Raw Sensor Value</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -726,7 +779,7 @@ const processSensorValue = (value) => {
                     <td>${index + 1}</td>
                     <td>${record.fullDate.toLocaleString()}</td>
                     <td>${record.value.toFixed(2)}</td>
-                    <td>${record.originalValue ?? record.value}</td>
+                    <td>${record.rawValue ?? record.originalValue ?? 'N/A'}</td>
                     <td class="${statusClass}">${statusText}</td>
                   </tr>
                 `;
@@ -838,14 +891,14 @@ const processSensorValue = (value) => {
         )}
 
         {/* Sensor Status Notice */}
-  {checkSensorCalibration(turbidityData.length > 0 ? turbidityData.map(d => ({value: d.originalValue ?? d.value})) : []) && (
+        {checkSensorCalibration(turbidityData.length > 0 ? turbidityData.map(d => ({raw_value: d.rawValue})) : []) && (
           <div className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg mb-4">
             <div className="flex items-center">
               <span className="text-xl mr-2">🔧</span>
               <div>
                 <strong>Sensor Status Alert:</strong>
                 <p className="text-sm">
-                  Unexpected NTU values detected — check ESP32 sensor connection or calibration at sidewalk drain location.
+                  Unexpected sensor values detected — check ESP32 sensor connection or calibration at sidewalk drain location.
                 </p>
               </div>
             </div>
@@ -876,8 +929,6 @@ const processSensorValue = (value) => {
             </div>
           </div>
 
-          {/* theme toggle moved to fixed top-left controls */}
-
           <div className="flex items-center space-x-3">
             <div className="text-xs text-gray-600 mr-2">Range:</div>
             <div className="flex space-x-2">
@@ -887,7 +938,8 @@ const processSensorValue = (value) => {
               <button onClick={() => onTimeRangeChange('all')} className={`px-3 py-1 rounded ${timeRange === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>All</button>
             </div>
 
-            <div className="text-xs bg-gray-200 px-2 py-1 rounded">Raw: {turbidityData[turbidityData.length - 1]?.originalValue ?? stats.latest} </div>
+            {/* ✅ UPDATED: Show raw sensor value */}
+            <div className="text-xs bg-gray-200 px-2 py-1 rounded">Raw: {turbidityData[turbidityData.length - 1]?.rawValue ?? 'N/A'}</div>
 
             <button onClick={toggleLiveUpdates} className={`px-3 py-1 rounded ${isLive ? 'bg-red-500 text-white' : 'bg-green-500 text-white'}`}>
               {isLive ? 'Pause' : 'Resume'}
@@ -1048,7 +1100,7 @@ const processSensorValue = (value) => {
                     let dtHours = (new Date(d.fullDate) - new Date(prev.fullDate)) / 3600000;
                     // Clamp to avoid division by tiny gaps; minimum 5 seconds equivalent
                     if (!dtHours || dtHours < (5/3600)) dtHours = 5/3600;
-                    let diff = (d.value - prev.value) / dtHours;
+                    let diff = (d.ntuValue - prev.ntuValue) / dtHours;
                     // Avoid artificial -200 floor; allow larger negative (clearing) values but cap extremes
                     if (diff < -10000) diff = -10000;
                     if (diff > thresholds.flooding * 2) diff = thresholds.flooding * 2;
