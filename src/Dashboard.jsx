@@ -323,20 +323,29 @@ const Dashboard = ({ isAdmin = false }) => {
   };
 
   // Determine alert level based on ESP32 thresholds
-  const determineAlertLevel = useCallback((latest, average, trend) => {
-    if (latest >= thresholds.flooding || average >= thresholds.flooding) {
-      return 'flooding';
-    } else if (latest >= thresholds.clogging || average >= thresholds.clogging) {
-      return 'clogging';
-    } else if (latest >= thresholds.highRisk || average >= thresholds.highRisk) {
-      return trend === 'rising' ? 'clogging' : 'highRisk';
-    } else if (latest >= thresholds.warning || average >= thresholds.warning) {
-      return trend === 'rising' ? 'highRisk' : 'warning';
-    } else if (latest >= thresholds.normal) {
-      return trend === 'rising' ? 'warning' : 'normal';
-    }
-    return 'normal';
-  }, []);
+  // Determine alert level based on ESP32 thresholds - DEBUG VERSION
+const determineAlertLevel = useCallback((latest, average, trend) => {
+  console.log('DEBUG determineAlertLevel:', { latest, average, trend, thresholds });
+  
+  if (latest >= thresholds.flooding || average >= thresholds.flooding) {
+    console.log('-> flooding');
+    return 'flooding';
+  } else if (latest >= thresholds.clogging || average >= thresholds.clogging) {
+    console.log('-> clogging');
+    return 'clogging';
+  } else if (latest >= thresholds.highRisk || average >= thresholds.highRisk) {
+    console.log('-> highRisk');
+    return trend === 'rising' ? 'clogging' : 'highRisk';
+  } else if (latest >= thresholds.warning || average >= thresholds.warning) {
+    console.log('-> warning');
+    return trend === 'rising' ? 'highRisk' : 'warning';
+  } else if (latest >= thresholds.normal) {
+    console.log('-> normal (via >= thresholds.normal)');
+    return trend === 'rising' ? 'warning' : 'normal';
+  }
+  console.log('-> normal (default)');
+  return 'normal';
+}, []);
 
   const computeAccumulationMetrics = useCallback((formatted) => {
     if (!formatted || formatted.length < 2) {
@@ -654,17 +663,52 @@ const Dashboard = ({ isAdmin = false }) => {
     return () => clearInterval(intervalId);
   }, [isLive, timeRange, fetchTurbidityData, checkForNewData]);
 
-  // small helpers - aligned with ESP32 thresholds
-  const getAlertConfig = (level) => {
-    const configs = {
-      normal: { color: 'green', icon: '✅', message: 'Clear Water - Normal sediment levels', bgColor: 'bg-green-100', borderColor: 'border-green-400', textColor: 'text-green-800' },
-      warning: { color: 'yellow', icon: '🔸', message: 'Light Sediment - Silt accumulation begins', bgColor: 'bg-yellow-100', borderColor: 'border-yellow-400', textColor: 'text-yellow-800' },
-      highRisk: { color: 'orange', icon: '🔶', message: 'Moderate Sediment - Significant sedimentation risk', bgColor: 'bg-orange-100', borderColor: 'border-orange-400', textColor: 'text-orange-800' },
-      clogging: { color: 'red', icon: '🚨', message: 'Heavy Sediment - High probability of clogging', bgColor: 'bg-red-100', borderColor: 'border-red-400', textColor: 'text-red-800' },
-      flooding: { color: 'darkred', icon: '💥', message: 'CRITICAL: FLOODING IMMINENT - EMERGENCY RESPONSE REQUIRED', bgColor: 'bg-red-200', borderColor: 'border-red-600', textColor: 'text-red-900' }
-    };
-    return configs[level] || configs.normal;
+ // small helpers - aligned with ESP32 thresholds
+const getAlertConfig = (level) => {
+  const configs = {
+    normal: { 
+      color: 'blue', 
+      icon: '✅', 
+      message: 'Clear Water - Normal sediment levels', 
+      bgColor: 'bg-blue-100', 
+      borderColor: 'border-blue-400', 
+      textColor: 'text-blue-800' 
+    },
+    warning: { 
+      color: 'yellow', 
+      icon: '🔸', 
+      message: 'Light Sediment - Silt accumulation begins', 
+      bgColor: 'bg-yellow-100', 
+      borderColor: 'border-yellow-400', 
+      textColor: 'text-yellow-800' 
+    },
+    highRisk: { 
+      color: 'orange', 
+      icon: '🔶', 
+      message: 'Moderate Sediment - Significant sedimentation risk', 
+      bgColor: 'bg-orange-100', 
+      borderColor: 'border-orange-400', 
+      textColor: 'text-orange-800' 
+    },
+    clogging: { 
+      color: 'red', 
+      icon: '🚨', 
+      message: 'Heavy Sediment - High probability of clogging', 
+      bgColor: 'bg-red-100', 
+      borderColor: 'border-red-400', 
+      textColor: 'text-red-800' 
+    },
+    flooding: { 
+      color: 'darkred', 
+      icon: '💥', 
+      message: 'CRITICAL: FLOODING IMMINENT - EMERGENCY RESPONSE REQUIRED', 
+      bgColor: 'bg-red-200', 
+      borderColor: 'border-red-600', 
+      textColor: 'text-red-900' 
+    }
   };
+  return configs[level] || configs.normal;
+};
 
   const getStatus = (v) => {
     if (v >= thresholds.flooding) return '💥 EXTREME - Flooding Imminent';
@@ -675,12 +719,12 @@ const Dashboard = ({ isAdmin = false }) => {
   };
 
   const getStatusColor = (v) => {
-    if (v >= thresholds.flooding) return 'text-red-900';
-    if (v >= thresholds.clogging) return 'text-red-700';
-    if (v >= thresholds.highRisk) return 'text-orange-600';
-    if (v >= thresholds.warning) return 'text-yellow-600';
-    return 'text-green-600';
-  };
+  if (v >= thresholds.flooding) return 'text-red-900';
+  if (v >= thresholds.clogging) return 'text-red-700';
+  if (v >= thresholds.highRisk) return 'text-orange-600';
+  if (v >= thresholds.warning) return 'text-yellow-600';
+  return 'text-blue-600'; // Changed from green to blue
+};
 
   const getTrendIcon = (trend) => (trend === 'rising' ? '📈' : trend === 'falling' ? '📉' : '➡️');
 
