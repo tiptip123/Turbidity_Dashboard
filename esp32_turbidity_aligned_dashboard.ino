@@ -17,1435 +17,242 @@ const thresholds = {
 // Sediment load calculation constants
 const SEDIMENT_CALIBRATION = {
   // Empirical formula coefficients for sediment concentration (mg/L) = a * NTU + b
-  a: 1.2,  // Slope - varies by sediment type
-  b: 5.0,  // Intercept - background turbidity
-  // Fixed flow rate assumption for urban drainage (m³/s)
-  flowRate: 0.5, // Normal runoff conditions
-  // Conversion factors
-  MG_TO_KG: 0.000001,
-  HOURS_TO_DAYS: 24
-};
+  // ESP32 Turbidity sketch aligned with dashboard fields and scale
+  #include <WiFi.h>
+  #include <HTTPClient.h>
+  #include <ArduinoJson.h>
 
-const Dashboard = ({ isAdmin = false }) => {
-  // core data + ui
-  const [turbidityData, setTurbidityData] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState({ latest: 0, average: 0, highest: 0, trend: 'stable' });
-  const [error, setError] = useState(null);
-  const [alertLevel, setAlertLevel] = useState('normal');
-  const [lastUpdate, setLastUpdate] = useState(new Date());
-  const [isLive, setIsLive] = useState(false);
-  const [isDark, setIsDark] = useState(() => {
-    try {
-      const v = localStorage.getItem('dashboard:isDark');
-      if (v !== null) return v === '1';
-      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    } catch {
-      return false;
+  // Wi-Fi credentials (replace with your own)
+  const char* ssid = "Suyat_4G";
+  const char* password = "suyat2003";
+
+  // Supabase configuration
+  const String SUPABASE_URL_READINGS = "https://sxkgbjbjojusedcgkhse.supabase.co/rest/v1/turbidity_readings";
+  const String SUPABASE_URL_ALERTS = "https://sxkgbjbjojusedcgkhse.supabase.co/rest/v1/alert_history";
+  const String SUPABASE_URL_RISKS = "https://sxkgbjbjojusedcgkhse.supabase.co/rest/v1/risk_assessments";
+  const String SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN4a2diamJqb2p1c2VkY2draHNlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTgyOTM5NjYsImV4cCI6MjA3Mzg2OTk2Nn0.aOyOJi3nfw1Bo5E8G-C5qGm_GrVyLrzeebHhB4_oMQ4"; // replace with your key
+
+  // Pins
+  const int turbidityPin = 34;
+  const int buzzerPin = 25;
+
+  // Calibration constants - aligned with dashboard mapping (0 - 3000 NTU)
+  // Dashboard conversion expects raw ADC around 6..2097 -> NTU up to 3000
+  const float RAW_CLEAR = 2097.0;
+  const float RAW_TURBID = 6.0;
+  const float NTU_MAX = 3000.0;
+
+  // Sediment thresholds - aligned with dashboard alert bands (NTU scale)
+  const float NTU_MODERATE = 2200.0; // normal -> warning boundary
+  const float NTU_HIGH = 3000.0;     // high risk
+  const float NTU_EXTREME = 3500.0;  // extreme (above typical NTU_MAX but kept for parity)
+
+  void setup() {
+    Serial.begin(115200);
+    pinMode(buzzerPin, OUTPUT);
+    digitalWrite(buzzerPin, HIGH); // Silent initially (inverted logic)
+
+    WiFi.begin(ssid, password);
+    Serial.print("Connecting to Wi-Fi");
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
     }
-  });
-  const [newDataAlert, setNewDataAlert] = useState(false);
-  const [riskAssessment, setRiskAssessment] = useState(null);
-
-  // sediment analytics
-  const [accumulationRate, setAccumulationRate] = useState(0); // NTU/hour
-  const [daysToClog, setDaysToClog] = useState(null); // days estimate
-  const [stabilityIndex, setStabilityIndex] = useState(100); // 0-100
-  const [distribution, setDistribution] = useState({
-    normal: 0, warning: 0, danger: 0, critical: 0
-  });
-
-  // SEDIMENT LOAD CALCULATIONS
-  const [sedimentLoad, setSedimentLoad] = useState({
-    current: 0,           // kg/m³ current sediment load
-    concentration: 0,     // mg/L current concentration
-    hourlyRate: 0,        // kg/hour sediment transport rate
-    dailyTotal: 0,        // kg/day total sediment transport
-    accumulated: 0,       // kg total accumulated sediment
-    loadTrend: 'stable'   // trend of sediment load
-  });
-
-  const [timeRange, setTimeRange] = useState('today'); // 'today' | 'week' | 'month'
-
-  const lastDataId = useRef(0);
-  const chartDataRef = useRef([]);
-  const statsRef = useRef(stats);
-  const turbidityDataRef = useRef(turbidityData);
-
-  useEffect(() => {
-    statsRef.current = stats;
-    turbidityDataRef.current = turbidityData;
-  }, [stats, turbidityData]);
-
-  // Apply dark-mode class to <html> and persist preference
-  useEffect(() => {
-    try {
-      if (isDark) {
-        document.documentElement.classList.add('dark');
-        localStorage.setItem('dashboard:isDark', '1');
-      } else {
-        document.documentElement.classList.remove('dark');
-        localStorage.setItem('dashboard:isDark', '0');
-      }
-    } catch {
-      // ignore
-    }
-  }, [isDark]);
-
-  // SEDIMENT LOAD CALCULATION FUNCTIONS
-  const calculateSedimentConcentration = useCallback((ntuValue) => {
-    // Empirical formula: Sediment concentration (mg/L) = a * NTU + b
-    return SEDIMENT_CALIBRATION.a * ntuValue + SEDIMENT_CALIBRATION.b;
-  }, []);
-
-  const calculateSedimentLoad = useCallback((ntuValue) => {
-    const concentration = calculateSedimentConcentration(ntuValue); // mg/L
-    // Convert to kg/m³: (mg/L) * (kg/1,000,000 mg) * (1000 L/m³) = kg/m³
-    const loadKgPerM3 = concentration * SEDIMENT_CALIBRATION.MG_TO_KG * 1000;
-    return loadKgPerM3;
-  }, [calculateSedimentConcentration]);
-
-  const calculateSedimentTransportRate = useCallback((ntuValue) => {
-    const concentration = calculateSedimentConcentration(ntuValue); // mg/L
-    // Transport rate (kg/hour) = concentration (mg/L) * flow (m³/s) * 3.6
-    const transportRate = concentration * SEDIMENT_CALIBRATION.flowRate * 3.6 * SEDIMENT_CALIBRATION.MG_TO_KG * 1000;
-    return transportRate;
-  }, [calculateSedimentConcentration]);
-
-  const updateSedimentLoadMetrics = useCallback((turbidityData, currentNTU) => {
-    if (!turbidityData || turbidityData.length === 0) return;
-
-    const currentConcentration = calculateSedimentConcentration(currentNTU);
-    const currentLoad = calculateSedimentLoad(currentNTU);
-    const currentTransportRate = calculateSedimentTransportRate(currentNTU);
-    
-    // Calculate daily total (kg/day)
-    const dailyTransport = currentTransportRate * 24;
-    
-    // Calculate accumulated sediment (simplified - would need time integration in production)
-    const averageConcentration = turbidityData.reduce((sum, point) => 
-      sum + calculateSedimentConcentration(point.ntuValue), 0) / turbidityData.length;
-    const averageTransport = averageConcentration * SEDIMENT_CALIBRATION.flowRate * 3.6 * SEDIMENT_CALIBRATION.MG_TO_KG * 1000;
-    const estimatedAccumulated = averageTransport * 24; // kg accumulated today
-    
-    // Calculate load trend
-    const recentData = turbidityData.slice(-10);
-    const loadTrend = recentData.length >= 2 ? 
-      (calculateSedimentLoad(recentData[recentData.length - 1].ntuValue) > 
-       calculateSedimentLoad(recentData[0].ntuValue) ? 'rising' : 'falling') : 'stable';
-
-    setSedimentLoad({
-      current: Number(currentLoad.toFixed(4)),
-      concentration: Math.round(currentConcentration),
-      hourlyRate: Number(currentTransportRate.toFixed(2)),
-      dailyTotal: Math.round(dailyTransport),
-      accumulated: Math.round(estimatedAccumulated),
-      loadTrend: loadTrend
-    });
-  }, [calculateSedimentConcentration, calculateSedimentLoad, calculateSedimentTransportRate]);
-
-  const toggleTheme = () => setIsDark(d => !d);
-  const handleLogout = async () => {
-    try {
-      // Sign out via Supabase Auth
-      if (supabase && supabase.auth && typeof supabase.auth.signOut === 'function') {
-        await supabase.auth.signOut();
-      }
-    } catch (error) {
-      console.error('Error during logout:', error);
-    }
-    // Reload the page to clear state and return to login
-    window.location.href = import.meta.env.BASE_URL || '/';
-  };
-
-  // UPDATED RISK ASSESSMENT - Match ESP32 logic
-  const predictCloggingRisk = useCallback((latest) => {
-    if (latest >= thresholds.flooding) {
-      return {
-        risk: 'EXTREME',
-        floodRisk: 'EXTREME',
-        sedimentLevel: 'Extreme Sediment - CLOGGING!',
-        timeframe: 'IMMEDIATE (10-30 minutes)',
-        action: '💥 CRITICAL: FLOODING IMMINENT - EMERGENCY RESPONSE REQUIRED',
-        probability: '95-99%',
-        consequences: 'Drain completely blocked - Public safety critical hazard',
-        maintenance: 'EMERGENCY: Dispatch crew immediately - Activate emergency protocol',
-        samplingInterval: '10 seconds (Maximum sampling rate)',
-        riskLevel: 4
-      };
-    } else if (latest >= thresholds.clogging) {
-      return {
-        risk: 'VERY HIGH',
-        floodRisk: 'VERY HIGH',
-        sedimentLevel: 'Heavy Sediment',
-        timeframe: 'IMMEDIATE (30 minutes - 2 hours)',
-        action: '🚨 ALERT: DRAINAGE CLOGGING LIKELY - IMMEDIATE ACTION NEEDED',
-        probability: '85-95%',
-        consequences: 'Drainage system will clog rapidly - High flooding risk',
-        maintenance: 'URGENT: Drain cleaning required - Dispatch within 1 hour',
-        samplingInterval: '30 seconds (High risk sampling)',
-        riskLevel: 3
-      };
-    } else if (latest >= thresholds.highRisk) {
-      return {
-        risk: 'HIGH',
-        floodRisk: 'HIGH',
-        sedimentLevel: 'Moderate Sediment',
-        timeframe: '4-12 hours',
-        action: 'Schedule drain cleaning within 24 hours - Monitor closely',
-        probability: '65-80%',
-        consequences: 'Moderate flooding risk during rain - Reduced drainage capacity',
-        maintenance: 'Schedule maintenance within 24 hours',
-        samplingInterval: '1 minute (Elevated monitoring)',
-        riskLevel: 2
-      };
-    } else if (latest >= thresholds.warning) {
-      return {
-        risk: 'MODERATE',
-        floodRisk: 'MODERATE',
-        sedimentLevel: 'Light Sediment',
-        timeframe: '1-3 days if trend continues',
-        action: 'Plan routine cleaning - Monitor accumulation rate',
-        probability: '35-60%',
-        consequences: 'Light sediment accumulation - Reduced drainage efficiency',
-        maintenance: 'Schedule routine maintenance within 1 week',
-        samplingInterval: '1 minute (Warning monitoring)',
-        riskLevel: 1
-      };
-    }
-    return {
-      risk: 'LOW',
-      floodRisk: 'LOW',
-      sedimentLevel: 'Clear Water',
-      timeframe: 'No immediate threat',
-      action: 'Normal operation - Continue routine monitoring',
-      probability: '5-20%',
-      consequences: 'Clear drainage flow - Normal urban runoff',
-      maintenance: 'Continue routine inspections',
-      samplingInterval: '5 minutes (Normal monitoring)',
-      riskLevel: 0
-    };
-  }, []);
-
-  // UPDATED CALIBRATION FUNCTION - Match ESP32 inverted behavior
-  const convertRawToNTU = (rawValue) => {
-    let raw = Number(rawValue);
-    if (Number.isNaN(raw)) return 0;
-
-    // ESP32 ADC range is 0-4095
-    if (raw < 0) raw = 0;
-    if (raw > 4095) raw = 4095;
-
-    const linearMap = (x, inMin, inMax, outMin, outMax) => {
-      if (inMax === inMin) return outMin;
-      const t = (x - inMin) / (inMax - inMin);
-      return outMin + t * (outMax - outMin);
-    };
-
-    let ntu;
-    
-    // MATCH ESP32 CALIBRATION - Based on your test results:
-    // Clear water = ~2026 NTU, Muddy water = ~3754 NTU
-    if (raw >= 2000.0) {
-      // Clear to slightly turbid water: raw 2000-4095 → NTU 2000-2500
-      ntu = linearMap(raw, 2000.0, 4095.0, 2000.0, 2500.0);
-    } else if (raw >= 1000.0) {
-      // Moderate sediment: raw 1000-2000 → NTU 2500-3200
-      ntu = linearMap(raw, 1000.0, 2000.0, 2500.0, 3200.0);
-    } else {
-      // Heavy sediment: raw 0-1000 → NTU 3200-4000
-      ntu = linearMap(raw, 0.0, 1000.0, 3200.0, 4000.0);
-    }
-    
-    // Clamp final NTU value
-    if (ntu < 0) ntu = 0;
-    if (ntu > 4000) ntu = 4000;
-    
-    return Math.round(ntu * 10) / 10;
-  };
-
-  // Sensor validation
-  const checkSensorCalibration = (readings) => {
-    if (!readings || readings.length === 0) return false;
-    
-    // Check if we have raw_value data
-    const hasRawValues = readings.some(item => item.raw_value !== undefined && item.raw_value !== null);
-    
-    if (hasRawValues) {
-      const avgRawValue = readings.reduce((sum, val) => sum + Number(val.raw_value || 0), 0) / readings.length;
-      // Flag if raw_value out of expected ESP32 ADC range (0-4095)
-      if (avgRawValue > 4095 || avgRawValue < 0) {
-        console.warn('⚠️ SENSOR CALIBRATION WARNING: Unexpected raw_value:', avgRawValue);
-        return true;
-      }
-    }
-    
-    return false;
-  };
-
-  // Process sensor value - use ntu_value if available, otherwise convert from raw_value
-  const processSensorValue = (item) => {
-    // Prefer ntu_value if available (already converted on ESP32)
-    if (item.ntu_value !== undefined && item.ntu_value !== null) {
-      return Number(item.ntu_value);
-    }
-    
-    // If we have raw_value, convert it using ESP32 calibration
-    if (item.raw_value !== undefined && item.raw_value !== null) {
-      return convertRawToNTU(item.raw_value);
-    }
-    
-    // Fallback to value field (should be NTU from ESP32)
-    if (item.value !== undefined && item.value !== null) {
-      return Number(item.value);
-    }
-    
-    return 0;
-  };
-
-  // Get raw sensor value for display
-  const getRawSensorValue = (item) => {
-    // Prefer raw_value field from ESP32
-    if (item.raw_value !== undefined && item.raw_value !== null) {
-      return Number(item.raw_value);
-    }
-    
-    // Fallback to originalValue for backward compatibility
-    if (item.originalValue !== undefined && item.originalValue !== null) {
-      return Number(item.originalValue);
-    }
-    
-    return null;
-  };
-
-  // calculate trend helper function
-  const calculateTrend = (values) => {
-    if (!values || values.length < 2) return 'stable';
-    const mid = Math.floor(values.length / 2);
-    const first = values.slice(0, mid);
-    const second = values.slice(mid);
-    const avg1 = first.reduce((a, b) => a + b, 0) / first.length;
-    const avg2 = second.reduce((a, b) => a + b, 0) / second.length;
-    if (avg2 > avg1 * 1.1) return 'rising';
-    if (avg2 < avg1 * 0.9) return 'falling';
-    return 'stable';
-  };
-
-  // UPDATED FLOOD RISK ASSESSMENT
-  const assessFloodRisk = (ntu) => {
-    if (ntu < thresholds.normal) return "LOW";
-    else if (ntu < thresholds.warning) return "MODERATE";
-    else if (ntu < thresholds.highRisk) return "HIGH";
-    else if (ntu < thresholds.clogging) return "VERY HIGH";
-    else return "EXTREME";
-  };
-
-  // UPDATED SEDIMENT LEVEL ASSESSMENT
-  const getSedimentationLevel = (ntu) => {
-    if (ntu < 2200) return "Crystal Clear";
-    else if (ntu < 2500) return "Clear Water";
-    else if (ntu < 3000) return "Light Sediment";
-    else if (ntu < 3500) return "Moderate Sediment";
-    else if (ntu < 3800) return "Heavy Sediment";
-    else return "Extreme Sediment - CLOGGING!";
-  };
-
-  // Determine alert level based on ESP32 thresholds
-  const determineAlertLevel = useCallback((latest, average, trend) => {
-    if (latest >= thresholds.flooding || average >= thresholds.flooding) {
-      return 'flooding';
-    } else if (latest >= thresholds.clogging || average >= thresholds.clogging) {
-      return 'clogging';
-    } else if (latest >= thresholds.highRisk || average >= thresholds.highRisk) {
-      return trend === 'rising' ? 'clogging' : 'highRisk';
-    } else if (latest >= thresholds.warning || average >= thresholds.warning) {
-      return trend === 'rising' ? 'highRisk' : 'warning';
-    } else if (latest >= thresholds.normal) {
-      return trend === 'rising' ? 'warning' : 'normal';
-    }
-    return 'normal';
-  }, []);
-
-  const computeAccumulationMetrics = useCallback((formatted) => {
-    if (!formatted || formatted.length < 2) {
-      setAccumulationRate(0);
-      setDaysToClog(null);
-      setStabilityIndex(100);
-      return;
-    }
-
-    // Use a stable window (last 30 minutes or up to 60 points) to reduce noise
-    const WINDOW_MS = 30 * 60 * 1000; // 30 minutes
-    const MAX_POINTS = 60;
-    const endIdx = formatted.length - 1;
-    let startIdx = endIdx;
-    const endTime = formatted[endIdx].fullDate.getTime();
-    
-    while (startIdx > 0 && 
-           (endTime - formatted[startIdx - 1].fullDate.getTime()) <= WINDOW_MS && 
-           (endIdx - (startIdx - 1)) <= MAX_POINTS) {
-      startIdx--;
-    }
-    
-    const windowData = formatted.slice(startIdx, endIdx + 1);
-    
-    if (windowData.length < 2) {
-      const slice = formatted.slice(-Math.min(6, formatted.length));
-      const first = slice[0];
-      const last = slice[slice.length - 1];
-      const rawDtHours = (last.fullDate - first.fullDate) / 3600000;
-      const MIN_DT_HOURS = 30 / 3600;
-      const dtHours = Math.max(rawDtHours, MIN_DT_HOURS);
-      
-      let clampedRate = 0;
-      if (rawDtHours < MIN_DT_HOURS) {
-        clampedRate = 0;
-        setAccumulationRate(0);
-      } else {
-        const rate = (last.ntuValue - first.ntuValue) / dtHours;
-        clampedRate = Math.max(-10000, Math.min(thresholds.flooding * 2, rate));
-        setAccumulationRate(Number(clampedRate.toFixed(2)));
-      }
-      
-      const current = last.ntuValue;
-      if (clampedRate > 0) {
-        const ntuLeft = thresholds.clogging - current;
-        const hoursToClog = ntuLeft > 0 ? (ntuLeft / clampedRate) : 0;
-        const days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
-        setDaysToClog(days);
-      } else {
-        setDaysToClog(null);
-      }
-      
-      // Stability based on rate of change
-      let stability = Math.max(0, 100 - Math.min(100, Math.abs(clampedRate) / thresholds.clogging * 100));
-      setStabilityIndex(Math.round(stability));
-      return;
-    }
-
-    // Compute slope via simple least squares (value vs time hours)
-    const t0 = windowData[0].fullDate.getTime();
-    const times = windowData.map(d => (d.fullDate.getTime() - t0) / 3600000);
-    const values = windowData.map(d => d.ntuValue);
-    const n = values.length;
-    const meanT = times.reduce((a, b) => a + b, 0) / n;
-    const meanV = values.reduce((a, b) => a + b, 0) / n;
-    
-    let num = 0;
-    let den = 0;
-    for (let i = 0; i < n; i++) {
-      const dt = times[i] - meanT;
-      num += dt * (values[i] - meanV);
-      den += dt * dt;
-    }
-    
-    let slopePerHour = den > 0 ? (num / den) : 0;
-    const MAX_POS_RATE = thresholds.flooding * 2;
-    const MAX_NEG_RATE = -10000;
-    if (slopePerHour > MAX_POS_RATE) slopePerHour = MAX_POS_RATE;
-    if (slopePerHour < MAX_NEG_RATE) slopePerHour = MAX_NEG_RATE;
-
-    setAccumulationRate(Number(slopePerHour.toFixed(2)));
-
-    const current = windowData[windowData.length - 1].ntuValue;
-    if (slopePerHour > 0) {
-      const ntuLeft = thresholds.clogging - current;
-      const hoursToClog = ntuLeft > 0 ? (ntuLeft / slopePerHour) : 0;
-      const days = hoursToClog > 0 ? Number((hoursToClog / 24).toFixed(1)) : 0;
-      setDaysToClog(days);
-    } else {
-      setDaysToClog(null);
-    }
-
-    // Stability based on residual variance
-    let residualSum = 0;
-    for (let i = 0; i < n; i++) {
-      const fitted = meanV + slopePerHour * (times[i] - meanT);
-      const r = values[i] - fitted;
-      residualSum += Math.abs(r);
-    }
-    const avgResidual = residualSum / n;
-    const stability = Math.max(0, 100 - Math.min(100, (avgResidual / thresholds.clogging) * 100));
-    setStabilityIndex(Math.round(stability));
-  }, []);
-
-  const computeDistribution = useCallback((values) => {
-    const bins = { normal: 0, warning: 0, highRisk: 0, clogging: 0, flooding: 0 };
-    if (!values || values.length === 0) {
-      setDistribution({ normal: 0, warning: 0, danger: 0, critical: 0 });
-      return;
-    }
-    values.forEach(v => {
-      if (v < thresholds.normal) bins.normal++;
-      else if (v < thresholds.warning) bins.warning++;
-      else if (v < thresholds.highRisk) bins.highRisk++;
-      else if (v < thresholds.clogging) bins.clogging++;
-      else bins.flooding++;
-    });
-    // Map to existing state structure for backward compatibility
-    setDistribution({
-      normal: bins.normal,
-      warning: bins.warning + bins.highRisk,
-      danger: bins.clogging,
-      critical: bins.flooding
-    });
-  }, []);
-
-  // main process function — uses proper NTU conversion
-  const processTurbidityData = useCallback((data) => {
-    const formatted = data
-      .map(item => ({
-        time: new Date(item.created_at).toLocaleTimeString(),
-        value: processSensorValue(item), // Use proper NTU conversion
-        ntuValue: processSensorValue(item), // Store NTU value separately
-        fullDate: new Date(item.created_at),
-        date: new Date(item.created_at).toLocaleDateString(),
-        id: item.id,
-        rawValue: getRawSensorValue(item), // Store raw sensor value
-        originalValue: getRawSensorValue(item) // Backward compatibility
-      }))
-      .reverse();
-    
-    const values = formatted.map(d => Number(d.ntuValue) || 0);
-    const latest = values.length ? values[values.length - 1] : 0;
-    const average = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
-    const highest = values.length ? Math.max(...values) : 0;
-    const trend = calculateTrend(values.slice(-10));
-    const alert = determineAlertLevel(latest, average, trend);
-    const risk = predictCloggingRisk(latest);
-    computeAccumulationMetrics(formatted);
-    computeDistribution(values);
-    
-    // UPDATE SEDIMENT LOAD METRICS
-    updateSedimentLoadMetrics(formatted, latest);
-    
-    setTurbidityData(formatted.slice(-1000));
-    chartDataRef.current = formatted.slice(-1000);
-    setStats({ latest, average: Math.round(average), highest, trend });
-    setAlertLevel(alert);
-    setRiskAssessment(risk);
-  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk, updateSedimentLoadMetrics]);
-
-  // incremental update for small inserts
-  const updateStatsIncrementally = useCallback((data) => {
-    if (!data || data.length === 0) return;
-    const values = data.map(d => Number(d.ntuValue) || 0);
-    const latest = values[values.length - 1];
-    const avg = values.reduce((a, b) => a + b, 0) / values.length;
-    const highest = Math.max(...values);
-    const trend = calculateTrend(values.slice(-10));
-    const alert = determineAlertLevel(latest, avg, trend);
-    const risk = predictCloggingRisk(latest);
-    computeAccumulationMetrics(data);
-    computeDistribution(values);
-    
-    // UPDATE SEDIMENT LOAD METRICS
-    updateSedimentLoadMetrics(data, latest);
-    
-    setStats({ latest, average: Math.round(avg), highest, trend });
-    setAlertLevel(alert);
-    setRiskAssessment(risk);
-  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk, updateSedimentLoadMetrics]);
-
-  // fetch only new rows since last id
-  const fetchNewData = useCallback(async (sinceId) => {
-    try {
-      const { data, error } = await supabase
-        .from('turbidity_readings')
-        .select('id, value, raw_value, ntu_value, created_at')
-        .gt('id', sinceId)
-        .order('id', { ascending: true });
-      if (error) {
-        console.error('Error fetching new data:', error);
-        return;
-      }
-      if (data && data.length > 0) {
-        const newDataPoints = data.map(item => ({
-          time: new Date(item.created_at).toLocaleTimeString(),
-          value: processSensorValue(item), // Use proper NTU conversion
-          ntuValue: processSensorValue(item), // Store NTU value
-          fullDate: new Date(item.created_at),
-          date: new Date(item.created_at).toLocaleDateString(),
-          id: item.id,
-          rawValue: item.raw_value, // Store raw_value from ESP32
-          originalValue: item.raw_value // Backward compatibility
-        }));
-        lastDataId.current = data[data.length - 1].id;
-        const updatedData = [...turbidityDataRef.current, ...newDataPoints].slice(-1000);
-        setTurbidityData(updatedData);
-        chartDataRef.current = updatedData;
-        updateStatsIncrementally(updatedData);
-        setNewDataAlert(true);
-        setLastUpdate(new Date());
-        setTimeout(() => setNewDataAlert(false), 4000);
-      }
-    } catch (err) {
-      console.error('Error fetching new rows:', err);
-    }
-  }, [updateStatsIncrementally]);
-
-  // check for newest row
-  const checkForNewData = useCallback(async () => {
-    try {
-      const { data, error } = await supabase
-        .from('turbidity_readings')
-        .select('id')
-        .order('id', { ascending: false })
-        .limit(1);
-      if (error) {
-        console.error('Error checking for new data:', error);
-        return;
-      }
-      if (data && data.length > 0) {
-        const latestId = data[0].id;
-        if (latestId > lastDataId.current) fetchNewData(lastDataId.current);
-      }
-    } catch (err) {
-      console.error('Error in data check:', err);
-    }
-  }, [fetchNewData]);
-
-  // Build a Supabase date filter based on the timeRange - memoized
-  const buildDateFilter = useCallback(() => {
-    const now = new Date();
-    if (timeRange === 'today') {
-      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0).toISOString();
-      return (query) => query.gte('created_at', start);
-    }
-    if (timeRange === 'week') {
-      const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-      return (query) => query.gte('created_at', start);
-    }
-    if (timeRange === 'month') {
-      const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      return (query) => query.gte('created_at', start);
-    }
-    // 'all' case - return query without any date filter
-    return (query) => query;
-  }, [timeRange]);
-
-  // fetch data (with time filter) - includes new fields
-  const fetchTurbidityData = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      let query = supabase
-        .from('turbidity_readings')
-        .select('id, value, raw_value, ntu_value, created_at')
-        .order('created_at', { ascending: false })
-        .limit(1000); // fetch up to 1000 for range aggregation
-
-      // apply date filter
-      const applyFilter = buildDateFilter();
-      query = applyFilter(query);
-
-      const { data, error: supabaseError } = await query;
-
-      if (supabaseError) {
-        console.error('Supabase error:', supabaseError);
-        setError('Failed to fetch data from database');
-        return;
-      }
-
-      if (data && data.length > 0) {
-        checkSensorCalibration(data);
-        lastDataId.current = data[0].id;
-        processTurbidityData(data);
-        setLastUpdate(new Date());
-        setError(null);
-      } else {
-        // Show empty state but don't set error - this is normal if no data yet
-        setTurbidityData([]);
-        // Only show error if it's not a fresh fetch (i.e., we've loaded before)
-        if (turbidityDataRef.current.length > 0) {
-          setError('No data found in turbidity_readings table for selected range');
-        }
-      }
-    } catch (err) {
-      console.error('Error:', err);
-      setError('An unexpected error occurred');
-    } finally {
-      setLoading(false);
-    }
-  }, [buildDateFilter, processTurbidityData]);
-
-  useEffect(() => {
-    fetchTurbidityData();
-
-    // Poll for new DB rows frequently so the dashboard reflects ESP32 adaptive sampling quickly.
-    const intervalId = setInterval(() => {
-      if (isLive) checkForNewData();
-    }, 5000);
-
-    return () => clearInterval(intervalId);
-  }, [isLive, timeRange, fetchTurbidityData, checkForNewData]);
-
-  // UPDATED ALERT CONFIG - Match ESP32 behavior
-  const getAlertConfig = (level) => {
-    const configs = {
-      normal: { 
-        color: 'green', 
-        icon: '✅', 
-        message: 'Clear Water - Normal sediment levels', 
-        bgColor: 'bg-green-100', 
-        borderColor: 'border-green-400', 
-        textColor: 'text-green-800' 
-      },
-      warning: { 
-        color: 'yellow', 
-        icon: '🔸', 
-        message: 'Light Sediment - Slight accumulation detected', 
-        bgColor: 'bg-yellow-100', 
-        borderColor: 'border-yellow-400', 
-        textColor: 'text-yellow-800' 
-      },
-      highRisk: { 
-        color: 'orange', 
-        icon: '🔶', 
-        message: 'Moderate Sediment - Elevated sediment levels', 
-        bgColor: 'bg-orange-100', 
-        borderColor: 'border-orange-400', 
-        textColor: 'text-orange-800' 
-      },
-      clogging: { 
-        color: 'red', 
-        icon: '🚨', 
-        message: 'Heavy Sediment - Clogging likely', 
-        bgColor: 'bg-red-100', 
-        borderColor: 'border-red-400', 
-        textColor: 'text-red-800' 
-      },
-      flooding: { 
-        color: 'darkred', 
-        icon: '💥', 
-        message: 'CRITICAL: Extreme Sediment - Flooding imminent', 
-        bgColor: 'bg-red-200', 
-        borderColor: 'border-red-600', 
-        textColor: 'text-red-900' 
-      }
-    };
-    return configs[level] || configs.normal;
-  };
-
-  // UPDATED STATUS DISPLAY
-  const getStatus = (v) => {
-    if (v >= thresholds.flooding) return '💥 EXTREME - Flooding Imminent';
-    if (v >= thresholds.clogging) return '🚨 VERY HIGH - Clogging Likely';
-    if (v >= thresholds.highRisk) return '🔶 HIGH - Elevated Risk';
-    if (v >= thresholds.warning) return '🔸 MODERATE - Monitor Closely';
-    return '✅ LOW - Clear Water';
-  };
-
-  const getStatusColor = (v) => {
-    if (v >= thresholds.flooding) return 'text-red-900';
-    if (v >= thresholds.clogging) return 'text-red-700';
-    if (v >= thresholds.highRisk) return 'text-orange-600';
-    if (v >= thresholds.warning) return 'text-yellow-600';
-    return 'text-green-600';
-  };
-
-  const getTrendIcon = (trend) => (trend === 'rising' ? '📈' : trend === 'falling' ? '📉' : '➡️');
-
-  // ADD BUZZER STATUS DISPLAY
-  const getBuzzerStatus = (riskLevel) => {
-    switch(riskLevel) {
-      case 4: return '🔊 CONTINUOUS - EMERGENCY';
-      case 3: return '🔊 FAST PULSE - HIGH RISK';
-      case 2: return '🔊 SLOW PULSE - MODERATE RISK';
-      case 1: return '🔊 SINGLE BEEP - WARNING';
-      default: return '🔇 SILENT - NORMAL';
-    }
-  };
-
-  const toggleLiveUpdates = () => setIsLive(!isLive);
-
-  // UPDATED INSIGHT FUNCTION
-  const buildInsight = () => {
-    if (!turbidityData || turbidityData.length < 2) return 'Collecting initial data from sediment sensor...';
-    
-    const rate = accumulationRate;
-    const floodRisk = riskAssessment?.floodRisk || 'UNKNOWN';
-    const sedimentLevel = riskAssessment?.sedimentLevel || 'UNKNOWN';
-    const latestNTU = stats.latest || 0;
-    const riskLevel = riskAssessment?.riskLevel || 0;
-
-    // Match ESP32 buzzer logic with risk levels
-    if (riskLevel === 4) {
-      return `💥 CRITICAL: FLOODING IMMINENT (${latestNTU.toFixed(1)} NTU) - ${floodRisk} RISK. ${riskAssessment?.maintenance || 'Emergency response required immediately.'} ESP32: Continuous buzzer active.`;
-    } else if (riskLevel === 3) {
-      return `🚨 ALERT: DRAINAGE CLOGGING LIKELY (${latestNTU.toFixed(1)} NTU) - ${floodRisk} RISK. Accumulation rate: ${rate} NTU/hr. ${daysToClog ? `Estimated blockage in ${daysToClog} days.` : ''} ${riskAssessment?.maintenance || 'Immediate action needed.'} ESP32: Fast pulse buzzer.`;
-    } else if (riskLevel === 2) {
-      return `🔶 ELEVATED: High sediment levels (${latestNTU.toFixed(1)} NTU) - ${floodRisk} RISK. Sediment accumulation rate: ${rate} NTU/hr. ${riskAssessment?.maintenance || 'Schedule maintenance within 24 hours.'} ESP32: Slow pulse buzzer.`;
-    } else if (riskLevel === 1) {
-      return `🔸 WARNING: Moderate sediment (${latestNTU.toFixed(1)} NTU) - ${floodRisk} RISK. Accumulation rate: ${rate} NTU/hr. ${riskAssessment?.maintenance || 'Plan routine cleaning.'} ESP32: Single beep alerts.`;
-    } else if (rate > 0) {
-      return `Sediment gradually accumulating (~${rate} NTU/hr) - ${sedimentLevel}. Flood Risk: ${floodRisk}. Stability index ${stabilityIndex}%. Monitor closely. ESP32: Normal operation.`;
-    } else if (rate < 0) {
-      return `✅ Sediment levels decreasing (${Math.abs(rate)} NTU/hr) - ${sedimentLevel}. Drain recently cleaned or heavy rain flushed system. Flood Risk: ${floodRisk}. Stability index ${stabilityIndex}%. System functioning normally.`;
-    }
-    return `Stable drainage conditions - ${sedimentLevel}. Flood Risk: ${floodRisk}. Stability index ${stabilityIndex}%. Sidewalk drain operating normally. ESP32: No alerts.`;
-  };
-
-  // UI handlers
-  const onTimeRangeChange = (range) => {
-    setTimeRange(range);
-  };
-
-  // Print date range state
-  const [printRange, setPrintRange] = useState({ start: null, end: null });
-  const [showPrintModal, setShowPrintModal] = useState(false);
-
-  // Print records function
-  const handlePrint = (selectedRange = null) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
-      alert('Please allow pop-ups to print records');
-      return;
-    }
-
-    // Filter data by date range if provided
-    let dataToUse = [...turbidityData];
-    if (selectedRange && selectedRange.start && selectedRange.end) {
-      const startDate = new Date(selectedRange.start);
-      const endDate = new Date(selectedRange.end);
-      console.log('Filtering between:', startDate, 'and', endDate);
-      
-      dataToUse = turbidityData.filter(record => {
-        const recordDate = new Date(record.fullDate);
-        const isInRange = recordDate >= startDate && recordDate <= endDate;
-        return isInRange;
-      });
-      
-      console.log('Filtered from', turbidityData.length, 'to', dataToUse.length, 'records');
-    }
-    const filteredData = dataToUse;
-
-    const printContent = `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>Sediment Monitoring Report</title>
-          <style>
-            @media print {
-              body { margin: 0; padding: 20px; font-family: Arial, sans-serif; }
-            }
-            body { margin: 20px; font-family: Arial, sans-serif; }
-            .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 20px; }
-            .header h1 { margin: 0; color: #2563eb; }
-            .header p { margin: 5px 0; color: #666; }
-            .summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; margin: 30px 0; padding: 20px; background: #f5f5f5; border-radius: 8px; }
-            .summary-item { text-align: center; }
-            .summary-item strong { display: block; margin-bottom: 5px; color: #333; }
-            .summary-item span { font-size: 24px; font-weight: bold; color: #2563eb; }
-            .sediment-summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin: 30px 0; padding: 20px; background: #f0f9ff; border-radius: 8px; border: 1px solid #bae6fd; }
-            .sediment-item { text-align: center; padding: 10px; }
-            .sediment-item strong { display: block; margin-bottom: 5px; color: #1e40af; font-size: 12px; }
-            .sediment-item span { font-size: 18px; font-weight: bold; color: #1e40af; }
-            table { width: 100%; border-collapse: collapse; margin: 30px 0; }
-            th { background: #2563eb; color: white; padding: 12px; text-align: left; font-weight: bold; }
-            td { padding: 10px; border-bottom: 1px solid #ddd; }
-            tr:nth-child(even) { background: #f9f9f9; }
-            .status-normal { color: green; font-weight: bold; }
-            .status-warning { color: orange; font-weight: bold; }
-            .status-danger { color: red; font-weight: bold; }
-            .status-critical { color: darkred; font-weight: bold; }
-            .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd; text-align: center; color: #666; font-size: 12px; }
-            @page { size: A4 landscape; margin: 1cm; }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <h1>Sediment Monitoring Report</h1>
-            <p>Generated: ${new Date().toLocaleString()}</p>
-            <p>Time Range: ${selectedRange ? `${new Date(selectedRange.start).toLocaleString()} to ${new Date(selectedRange.end).toLocaleString()}` : 'All Data'} | Total Records: ${selectedRange ? filteredData.length : turbidityData.length}</p>
-            <p><strong>Calibration Note:</strong> Clear water baseline = 2026 NTU | ESP32 synchronized thresholds</p>
-          </div>
-          
-          <div class="summary">
-            <div class="summary-item">
-              <strong>Latest Reading</strong>
-              <span>${filteredData.length ? filteredData[filteredData.length - 1].value.toFixed(1) : 0} NTU</span>
-            </div>
-            <div class="summary-item">
-              <strong>Average</strong>
-              <span>${filteredData.length ? (filteredData.reduce((sum, record) => sum + record.value, 0) / filteredData.length).toFixed(1) : 0} NTU</span>
-            </div>
-            <div class="summary-item">
-              <strong>Peak</strong>
-              <span>${filteredData.length ? Math.max(...filteredData.map(d => d.value)).toFixed(1) : 0} NTU</span>
-            </div>
-            <div class="summary-item">
-              <strong>Trend</strong>
-              <span>${calculateTrend(filteredData.map(d => d.value))}</span>
-            </div>
-            <div class="summary-item">
-              <strong>ESP32 Buzzer</strong>
-              <span>${getBuzzerStatus(riskAssessment?.riskLevel).split(' - ')[0]}</span>
-            </div>
-          </div>
-
-          <div class="summary">
-            <div class="summary-item">
-              <strong>Accumulation Rate</strong>
-              <span>${accumulationRate} NTU/hr</span>
-            </div>
-            <div class="summary-item">
-              <strong>Days to Clog</strong>
-              <span>${daysToClog !== null ? daysToClog + ' days' : 'Stable'}</span>
-            </div>
-            <div class="summary-item">
-              <strong>Stability Index</strong>
-              <span>${stabilityIndex}%</span>
-            </div>
-            <div class="summary-item">
-              <strong>Alert Level</strong>
-              <span>${alertLevel.toUpperCase()}</span>
-            </div>
-            <div class="summary-item">
-              <strong>Risk Level</strong>
-              <span>${riskAssessment?.riskLevel ?? 'N/A'}</span>
-            </div>
-          </div>
-
-          <!-- SEDIMENT LOAD SUMMARY -->
-          <div class="sediment-summary">
-            <div class="sediment-item">
-              <strong>Concentration</strong>
-              <span>${sedimentLoad.concentration} mg/L</span>
-            </div>
-            <div class="sediment-item">
-              <strong>Current Load</strong>
-              <span>${sedimentLoad.current} kg/m³</span>
-            </div>
-            <div class="sediment-item">
-              <strong>Transport Rate</strong>
-              <span>${sedimentLoad.hourlyRate} kg/hr</span>
-            </div>
-            <div class="sediment-item">
-              <strong>Daily Total</strong>
-              <span>${sedimentLoad.dailyTotal} kg/day</span>
-            </div>
-            <div class="sediment-item">
-              <strong>Accumulated</strong>
-              <span>${sedimentLoad.accumulated} kg</span>
-            </div>
-          </div>
-
-          ${riskAssessment ? `
-          <div style="margin: 20px 0; padding: 15px; background: ${alertLevel === 'flooding' || alertLevel === 'clogging' ? '#fee' : alertLevel === 'highRisk' ? '#fff3e0' : '#fff8e1'}; border-left: 4px solid ${alertLevel === 'flooding' || alertLevel === 'clogging' ? 'red' : alertLevel === 'highRisk' ? 'orange' : 'yellow'};">
-            <strong>Risk Assessment:</strong> ${riskAssessment.risk}<br>
-            <strong>Flood Risk:</strong> ${riskAssessment.floodRisk || 'N/A'}<br>
-            <strong>Sediment Level:</strong> ${riskAssessment.sedimentLevel || 'N/A'}<br>
-            <strong>Timeframe:</strong> ${riskAssessment.timeframe}<br>
-            <strong>Probability:</strong> ${riskAssessment.probability}<br>
-            <strong>Action:</strong> ${riskAssessment.action}<br>
-            <strong>ESP32 Buzzer:</strong> ${getBuzzerStatus(riskAssessment.riskLevel)}
-          </div>
-          ` : ''}
-
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Date & Time</th>
-                <th>NTU Value</th>
-                <th>Raw Sensor Value</th>
-                <th>Sediment Concentration</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${filteredData.map((record, index) => {
-                const concentration = calculateSedimentConcentration(record.value);
-                let statusClass = 'status-normal';
-                let statusText = 'Clear Water';
-                if (record.value >= thresholds.flooding) {
-                  statusClass = 'status-critical';
-                  statusText = 'Flooding Risk';
-                } else if (record.value >= thresholds.clogging) {
-                  statusClass = 'status-critical';
-                  statusText = 'Clogging Risk';
-                } else if (record.value >= thresholds.highRisk) {
-                  statusClass = 'status-danger';
-                  statusText = 'High Risk';
-                } else if (record.value >= thresholds.warning) {
-                  statusClass = 'status-warning';
-                  statusText = 'Warning';
-                }
-                return `
-                  <tr>
-                    <td>${index + 1}</td>
-                    <td>${record.fullDate.toLocaleString()}</td>
-                    <td>${record.value.toFixed(2)}</td>
-                    <td>${record.rawValue ?? record.originalValue ?? 'N/A'}</td>
-                    <td>${concentration.toFixed(1)} mg/L</td>
-                    <td class="${statusClass}">${statusText}</td>
-                  </tr>
-                `;
-              }).join('')}
-            </tbody>
-          </table>
-
-          <div class="footer">
-            <p>Report generated from Sediment Monitoring Dashboard | ${new Date().toLocaleString()}</p>
-            <p>Thresholds: Normal (&lt;${thresholds.normal} NTU), Warning (${thresholds.normal}–${thresholds.warning} NTU), High Risk (${thresholds.warning}–${thresholds.highRisk} NTU), Clogging (${thresholds.highRisk}–${thresholds.clogging} NTU), Flooding (&gt;=${thresholds.flooding} NTU)</p>
-            <p>Sediment Calculation: Concentration = ${SEDIMENT_CALIBRATION.a} × NTU + ${SEDIMENT_CALIBRATION.b} mg/L | Flow Rate: ${SEDIMENT_CALIBRATION.flowRate} m³/s</p>
-            <p><strong>ESP32 Synchronization:</strong> Clear water baseline = 2026 NTU | Calibration matched to physical device</p>
-          </div>
-        </body>
-      </html>
-    `;
-
-    printWindow.document.write(printContent);
-    printWindow.document.close();
-    printWindow.focus();
-    
-    // Wait for content to load, then print
-    setTimeout(() => {
-      printWindow.print();
-    }, 250);
-  };
-
-  // small loading state
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-xl text-gray-600 mb-2">Loading Sediment Monitoring System...</div>
-          <div className="text-sm text-gray-500">Connecting to ESP32 sensor...</div>
-        </div>
-      </div>
-    );
+    Serial.println("\nConnected to Wi-Fi!");
   }
 
-  const alertConfig = getAlertConfig(alertLevel);
+  void loop() {
+    int raw = analogRead(turbidityPin);
+    float voltage = raw * (3.3 / 4095.0);
+    float ntu = mapRawToNTU(raw);
+    String sedimentLevel = getSedimentLevel(ntu);
 
-  return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      {/* Top-left fixed controls: theme toggle + logout */}
-      <div className="fixed top-4 left-4 z-50 flex items-center space-x-3">
-        <button
-          onClick={toggleTheme}
-          aria-pressed={isDark}
-          aria-label="Toggle theme"
-          className={`btn btn-toggle ${isDark ? 'dark' : 'light'}`}
-          title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-        >
-          <span className="icon" aria-hidden="true">
-            {isDark ? (
-              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" fill="currentColor"/></svg>
-            ) : (
-              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v2M12 19v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            )}
-          </span>
-          <span className="text-xs">{isDark ? 'Dark' : 'Light'}</span>
-        </button>
+    Serial.print("RAW: "); Serial.print(raw);
+    Serial.print("\tVoltage: "); Serial.print(voltage, 3);
+    Serial.print(" V\tNTU: "); Serial.print(ntu, 1);
+    Serial.print("\tSediment: "); Serial.println(sedimentLevel);
 
-        <button
-          onClick={handleLogout}
-          aria-label="Logout"
-          className="btn btn-logout"
-          title="Sign out"
-        >
-          <span className="icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M16 17l5-5-5-5M21 12H9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><path d="M13 19H6a2 2 0 01-2-2V7a2 2 0 012-2h7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          </span>
-          <span className="text-xs">Logout</span>
-        </button>
-      </div>
-      <div className="max-w-7xl mx-auto">
-        {/* Error Message */}
-        {error && (
-          <div className="bg-red-100 border border-red-400 text-red-800 px-4 py-3 rounded-lg mb-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <span className="text-xl mr-2">❌</span>
-                <div>
-                  <strong>Error:</strong>
-                  <p className="text-sm">{error}</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setError(null)} 
-                className="text-red-800 hover:text-red-900 ml-4"
-                aria-label="Dismiss error"
-              >
-                ×
-              </button>
-            </div>
-          </div>
-        )}
+    handleBuzzer(ntu); // Pass NTU directly
 
-        {/* New Data Alert */}
-        {newDataAlert && (
-          <div className="bg-green-100 border border-green-400 text-green-800 px-4 py-3 rounded-lg mb-4 animate-pulse">
-            <div className="flex items-center">
-              <span className="text-xl mr-2">✨</span>
-              <div>
-                <strong>New Data Available!</strong>
-                <p className="text-sm">Fresh readings have been added to the dashboard.</p>
-              </div>
-            </div>
-          </div>
-        )}
+    if (WiFi.status() == WL_CONNECTED) {
+      int reading_id = sendTurbidityReading(raw, voltage, ntu); // numeric fields
+      if (reading_id <= 0) {
+        Serial.println("Invalid reading_id, skipping alert and risk upload.");
+      } else {
+        // Alerts for High or Extreme
+        if (sedimentLevel == "High" || sedimentLevel == "Extreme") {
+          sendAlert(reading_id, sedimentLevel, "Turbidity exceeded safe level!");
+        }
 
-        {/* Sensor Status Notice */}
-        {checkSensorCalibration(turbidityData.length > 0 ? turbidityData.map(d => ({raw_value: d.rawValue})) : []) && (
-          <div className="bg-yellow-100 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg mb-4">
-            <div className="flex items-center">
-              <span className="text-xl mr-2">🔧</span>
-              <div>
-                <strong>Sensor Status Alert:</strong>
-                <p className="text-sm">
-                  Unexpected sensor values detected — check ESP32 sensor connection or calibration at sidewalk drain location.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
+        // Risk assessment
+        int risk_level;
+        String flood_risk, probability, recommended_action;
 
-        {/* Location Info */}
-        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2 rounded-lg mb-4 text-sm">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <span className="mr-2">📍</span>
-              <span>
-                <strong>Monitoring:</strong> Sediment Accumulation | ESP32 Sensor Active |
-                <span className="ml-1">Update Frequency: {riskAssessment?.samplingInterval ?? 'Adaptive (ESP32-controlled)'}</span>
-              </span>
-            </div>
-            <span className="text-xs bg-blue-200 px-2 py-1 rounded">Live</span>
-          </div>
-        </div>
+        if (sedimentLevel == "Clear") {
+          risk_level = 1; flood_risk = "Low"; probability = "Low"; recommended_action = "No action needed";
+        } else if (sedimentLevel == "Moderate") {
+          risk_level = 2; flood_risk = "Moderate"; probability = "Moderate"; recommended_action = "Monitor closely";
+        } else if (sedimentLevel == "High") {
+          risk_level = 3; flood_risk = "High"; probability = "High"; recommended_action = "Take immediate action";
+        } else { // Extreme
+          risk_level = 4; flood_risk = "Very High"; probability = "Very High"; recommended_action = "Immediate intervention required";
+        }
 
-        {/* Status bar + time range */}
-        <div className="bg-white border px-4 py-3 rounded-lg mb-4 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="text-xl">{isLive ? '🔄' : '⏸️'}</div>
-            <div>
-              <div className="font-medium">{isLive ? 'Live monitoring active' : 'Updates paused'}</div>
-              <div className="text-xs text-gray-500">Last update: {lastUpdate.toLocaleString()}</div>
-            </div>
-          </div>
+        sendRiskAssessment(reading_id, risk_level, flood_risk, sedimentLevel, probability, recommended_action, "10s");
+      }
+    } else {
+      Serial.println("Wi-Fi not connected. Skipping upload.");
+    }
 
-          <div className="flex items-center space-x-3">
-            <div className="text-xs text-gray-600 mr-2">Range:</div>
-            <div className="flex space-x-2">
-              <button onClick={() => onTimeRangeChange('today')} className={`px-3 py-1 rounded ${timeRange === 'today' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Today</button>
-              <button onClick={() => onTimeRangeChange('week')} className={`px-3 py-1 rounded ${timeRange === 'week' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Week</button>
-              <button onClick={() => onTimeRangeChange('month')} className={`px-3 py-1 rounded ${timeRange === 'month' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>Month</button>
-              <button onClick={() => onTimeRangeChange('all')} className={`px-3 py-1 rounded ${timeRange === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-100'}`}>All</button>
-            </div>
+    delay(10000); // 10-second interval
+  }
 
-            {/* Show raw sensor value */}
-            <div className="text-xs bg-gray-200 px-2 py-1 rounded">Raw: {turbidityData[turbidityData.length - 1]?.rawValue ?? 'N/A'}</div>
+  // Map raw ADC to NTU (aligned with dashboard conversion)
+  float mapRawToNTU(int raw) {
+    // Clamp raw to ADC bounds
+    if (raw <= RAW_TURBID) return NTU_MAX;
+    if (raw >= RAW_CLEAR) return 0.0;
 
-            <button onClick={toggleLiveUpdates} className={`px-3 py-1 rounded ${isLive ? 'bg-red-500 text-white' : 'bg-green-500 text-white'}`}>
-              {isLive ? 'Pause' : 'Resume'}
-            </button>
-          </div>
-        </div>
+    // Linear mapping: RAW_CLEAR -> 0 NTU, RAW_TURBID -> NTU_MAX
+    return ((RAW_CLEAR - raw) * NTU_MAX) / (RAW_CLEAR - RAW_TURBID);
+  }
 
-        {/* Alert banner */}
-        <div className={`${alertConfig.bgColor} border ${alertConfig.borderColor} ${alertConfig.textColor} px-6 py-4 rounded-lg mb-6`}>
-          <div className="flex items-start">
-            <span className="text-2xl mr-3 mt-1">{alertConfig.icon}</span>
-            <div className="flex-1">
-              <h2 className="text-xl font-bold">Sediment Alert: {alertConfig.message}</h2>
-              <div className="mt-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 text-sm">
-                <div><strong>Flood Risk:</strong> <span className="ml-2 font-semibold">{riskAssessment?.floodRisk ?? 'N/A'}</span></div>
-                <div><strong>Risk Level:</strong> <span className="ml-2 font-semibold">{riskAssessment?.riskLevel ?? 'N/A'}</span></div>
-                <div><strong>Timeframe:</strong> <span className="ml-2">{riskAssessment?.timeframe ?? 'N/A'}</span></div>
-                <div><strong>Probability:</strong> <span className="ml-2">{riskAssessment?.probability ?? 'N/A'}</span></div>
-                <div><strong>Sediment:</strong> <span className="ml-2">{riskAssessment?.sedimentLevel ?? 'N/A'}</span></div>
-              </div>
-              <div className="mt-2 text-sm">
-                <strong>ESP32 Action:</strong> <span className="ml-2">{getBuzzerStatus(riskAssessment?.riskLevel)}</span>
-              </div>
-              <div className="mt-2 text-sm">
-                <strong>Maintenance Required:</strong> <span className="ml-2">{riskAssessment?.maintenance ?? 'N/A'}</span>
-              </div>
+  // Determine sediment level locally
+  String getSedimentLevel(float ntu) {
+    if (ntu < NTU_MODERATE) return "Clear";
+    if (ntu <= NTU_HIGH) return "Moderate";
+    if (ntu < NTU_EXTREME) return "High";
+    return "Extreme";
+  }
 
-              <p className="text-sm mt-2">
-                <strong>Current Reading:</strong> {(stats.latest || 0).toFixed(1)} NTU — 
-                <strong> Clear Water Baseline:</strong> 2026 NTU — 
-                <strong> ESP32 Sampling:</strong> {riskAssessment?.samplingInterval || 'Adaptive'}
-              </p>
-            </div>
-          </div>
-        </div>
+  // Handle buzzer based on NTU (inverted logic for wiring)
+  void handleBuzzer(float ntu) {
+    if (ntu < NTU_MODERATE) {
+      digitalWrite(buzzerPin, HIGH); // Silent
+    } 
+    else if (ntu <= NTU_HIGH) {
+      // warning/moderate - single short beep
+      pulseBuzzer(150);
+    } 
+    else if (ntu < NTU_EXTREME) {
+      // high - pulsing
+      pulseBuzzer(400);
+    } 
+    else {
+      digitalWrite(buzzerPin, LOW); // Continuous for extreme
+    }
+  }
 
-        <h1 className="text-3xl font-semibold text-gray-800 mb-2">Sediment Monitoring System</h1>
-        <p className="text-gray-600 mb-6">Real-time turbidity monitoring for sediment accumulation tracking - ESP32 Synchronized</p>
+  void pulseBuzzer(int intervalMs) {
+    digitalWrite(buzzerPin, LOW); // Turn buzzer ON
+    delay(intervalMs);
+    digitalWrite(buzzerPin, HIGH); // Turn buzzer OFF
+    delay(intervalMs);
+  }
 
-        {/* UPDATED Main Stats with Buzzer Status */}
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-6 mb-6">
-          <div className="bg-white p-5 rounded shadow">
-            <div className="text-sm font-semibold text-gray-600">Latest</div>
-            <div className={`text-2xl font-bold ${getStatusColor(stats.latest)}`}>{stats.latest} NTU</div>
-            <div className="text-xs text-gray-500 mt-1">{getStatus(stats.latest)}</div>
-          </div>
+  // Upload turbidity reading (send float NTU to match dashboard)
+  int sendTurbidityReading(int raw, float voltage, float ntu) {
+    HTTPClient http;
+    http.begin(SUPABASE_URL_READINGS);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("apikey", SUPABASE_KEY);
+    http.addHeader("Authorization", "Bearer " + SUPABASE_KEY);
+    http.addHeader("Prefer", "return=representation");
 
-          <div className="bg-white p-5 rounded shadow">
-            <div className="text-sm font-semibold text-gray-600">Average</div>
-            <div className="text-2xl font-bold text-blue-600">{stats.average} NTU</div>
-            <div className="text-xs text-gray-500 mt-1">{turbidityData.length} readings</div>
-          </div>
+    StaticJsonDocument<384> doc;
+    doc["raw_value"] = raw;
+    doc["voltage"] = voltage;
+    float ntuRounded = round(ntu * 10.0) / 10.0; // one decimal place
+    doc["ntu_value"] = ntuRounded;
+    doc["value"] = ntuRounded;
 
-          <div className="bg-white p-5 rounded shadow">
-            <div className="text-sm font-semibold text-gray-600">Peak</div>
-            <div className="text-2xl font-bold text-purple-600">{stats.highest} NTU</div>
-            <div className="text-xs text-gray-500 mt-1">Historical max</div>
-          </div>
+    String payload;
+    serializeJson(doc, payload);
 
-          <div className="bg-white p-5 rounded shadow">
-            <div className="text-sm font-semibold text-gray-600">Trend</div>
-            <div className="text-2xl font-bold">{getTrendIcon(stats.trend)}</div>
-            <div className="text-xs text-gray-500 mt-1">{stats.trend}</div>
-          </div>
+    int httpCode = http.POST(payload);
+    int reading_id = -1;
 
-          {/* ADD BUZZER STATUS */}
-          <div className="bg-white p-5 rounded shadow">
-            <div className="text-sm font-semibold text-gray-600">ESP32 Buzzer</div>
-            <div className={`text-2xl font-bold ${
-              riskAssessment?.riskLevel === 4 ? 'text-red-600' :
-              riskAssessment?.riskLevel === 3 ? 'text-orange-600' :
-              riskAssessment?.riskLevel === 2 ? 'text-yellow-600' :
-              riskAssessment?.riskLevel === 1 ? 'text-blue-600' :
-              'text-green-600'
-            }`}>
-              {getBuzzerStatus(riskAssessment?.riskLevel).split(' - ')[0]}
-            </div>
-            <div className="text-xs text-gray-500 mt-1">
-              {getBuzzerStatus(riskAssessment?.riskLevel).split(' - ')[1]}
-            </div>
-          </div>
-        </div>
+    if (httpCode == 201 || httpCode == 200) {
+      String resp = http.getString();
+      Serial.println("Turbidity reading uploaded successfully:");
+      Serial.println(resp);
 
-        {/* SEDIMENT LOAD ANALYTICS PANEL */}
-        <div className="bg-white rounded-lg shadow-md p-6 mb-8">
-          <h3 className="text-xl font-semibold text-gray-800 mb-4">Sediment Load Calculations</h3>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-            <div className="bg-blue-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-blue-700">Concentration</div>
-              <div className="text-2xl font-bold text-blue-800">{sedimentLoad.concentration} mg/L</div>
-              <div className="text-xs text-blue-600 mt-1">Sediment in water</div>
-            </div>
+      StaticJsonDocument<512> resDoc;
+      DeserializationError err = deserializeJson(resDoc, resp);
+      if (!err && resDoc.is<JsonArray>()) {
+        JsonArray arr = resDoc.as<JsonArray>();
+        if (arr.size() > 0) {
+          reading_id = arr[0]["id"] | -1;
+        }
+      } else {
+        Serial.print("JSON parse error: ");
+        Serial.println(err.c_str());
+      }
+    } else {
+      Serial.print("Error sending turbidity: ");
+      Serial.println(httpCode);
+      Serial.println(http.getString());
+    }
 
-            <div className="bg-green-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-green-700">Current Load</div>
-              <div className="text-2xl font-bold text-green-800">{sedimentLoad.current} kg/m³</div>
-              <div className="text-xs text-green-600 mt-1">Sediment density</div>
-            </div>
+    http.end();
+    return reading_id;
+  }
 
-            <div className="bg-orange-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-orange-700">Transport Rate</div>
-              <div className="text-2xl font-bold text-orange-800">{sedimentLoad.hourlyRate} kg/hr</div>
-              <div className="text-xs text-orange-600 mt-1">Sediment moving</div>
-            </div>
+  // Alerts
+  void sendAlert(int reading_id, String level, String message) {
+    if (reading_id <= 0) return;
 
-            <div className="bg-purple-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-purple-700">Daily Total</div>
-              <div className="text-2xl font-bold text-purple-800">{sedimentLoad.dailyTotal} kg/day</div>
-              <div className="text-xs text-purple-600 mt-1">Estimated daily transport</div>
-            </div>
+    HTTPClient http;
+    http.begin(SUPABASE_URL_ALERTS);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("apikey", SUPABASE_KEY);
+    http.addHeader("Authorization", "Bearer " + SUPABASE_KEY);
+    http.addHeader("Prefer", "return=representation");
 
-            <div className="bg-red-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-red-700">Accumulated</div>
-              <div className="text-2xl font-bold text-red-800">{sedimentLoad.accumulated} kg</div>
-              <div className="text-xs text-red-600 mt-1">Total sediment today</div>
-            </div>
-          </div>
+    StaticJsonDocument<256> doc;
+    doc["reading_id"] = reading_id;
+    doc["alert_level"] = level;
+    doc["message"] = message;
+    doc["acknowledged"] = false;
 
-          <div className="mt-4 text-sm text-gray-600">
-            <strong>Calculation Method:</strong> Sediment concentration = {SEDIMENT_CALIBRATION.a} × NTU + {SEDIMENT_CALIBRATION.b} mg/L | Flow rate: {SEDIMENT_CALIBRATION.flowRate} m³/s
-          </div>
-        </div>
+    String payload; serializeJson(doc, payload);
 
-        {/* Sediment Analytics Panel */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <div className="bg-white rounded-lg shadow-md p-6">
-            <h3 className="font-semibold text-gray-700 mb-2">Sediment Accumulation Rate</h3>
-            <div className="text-3xl font-bold text-indigo-600">{accumulationRate} NTU/hr</div>
-            <div className="text-xs text-gray-500 mt-1">Rate of sediment buildup in sidewalk drain (positive = accumulating)</div>
-          </div>
+    int code = http.POST(payload);
+    if (code == 201 || code == 200) Serial.println("Alert sent successfully.");
+    else {
+      Serial.print("Error sending alert: "); Serial.println(code);
+      Serial.println(http.getString());
+    }
+    http.end();
+  }
 
-          <div className="bg-white rounded-lg shadow-md p-6">
-            <h3 className="font-semibold text-gray-700 mb-2">Estimated Time to Blockage</h3>
-            <div className="text-3xl font-bold text-red-600">{daysToClog !== null ? `${daysToClog} days` : 'No immediate risk'}</div>
-            <div className="text-xs text-gray-500 mt-1">Projected days until drain blockage if trend continues</div>
-          </div>
+  // Risk assessment
+  void sendRiskAssessment(int reading_id, int risk_level, String flood_risk, String sediment_level, String probability, String action, String sampling_interval) {
+    if (reading_id <= 0) return;
 
-          <div className="bg-white rounded-lg shadow-md p-6">
-            <h3 className="font-semibold text-gray-700 mb-2">Stability Index</h3>
-            <div className={`text-3xl font-bold ${stabilityIndex > 70 ? 'text-green-600' : stabilityIndex > 40 ? 'text-yellow-600' : 'text-red-600'}`}>
-              {stabilityIndex}%
-            </div>
-            <div className="text-xs text-gray-500 mt-1">Higher = more stable (less sudden accumulation)</div>
-          </div>
-        </div>
+    HTTPClient http;
+    http.begin(SUPABASE_URL_RISKS);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("apikey", SUPABASE_KEY);
+    http.addHeader("Authorization", "Bearer " + SUPABASE_KEY);
+    http.addHeader("Prefer", "return=representation");
 
-        {/* Insight */}
-        <div className="bg-white rounded-lg shadow p-5 mb-6">
-          <h3 className="font-semibold text-gray-700 mb-2">Insight</h3>
-          <p className="text-sm text-gray-700">{buildInsight()}</p>
-        </div>
+    StaticJsonDocument<300> doc;
+    doc["reading_id"] = reading_id;
+    doc["risk_level"] = risk_level;
+    doc["flood_risk"] = flood_risk;
+    doc["sediment_level"] = sediment_level;
+    doc["probability"] = probability;
+    doc["recommended_action"] = action;
+    doc["sampling_interval"] = sampling_interval;
 
-        {/* Charts: Turbidity timeline + Accumulation rate + Distribution */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-          {/* Timeline */}
-          <div className="bg-white p-6 rounded shadow">
-            <h3 className="text-lg font-semibold mb-4">Sediment Turbidity Timeline</h3>
-            {turbidityData.length > 0 ? (
-              <div style={{ width: '100%', height: 360 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={turbidityData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" minTickGap={20} />
-                    <YAxis label={{ value: 'NTU', angle: -90, position: 'insideLeft' }} />
-                    <ReferenceLine y={thresholds.normal} stroke="green" label={`Normal (${thresholds.normal})`} />
-                    <ReferenceLine y={thresholds.warning} stroke="orange" label={`Warning (${thresholds.warning})`} />
-                    <ReferenceLine y={thresholds.highRisk} stroke="orangered" label={`High Risk (${thresholds.highRisk})`} />
-                    <ReferenceLine y={thresholds.clogging} stroke="red" label={`Clogging (${thresholds.clogging})`} />
-                    <ReferenceLine y={thresholds.flooding} stroke="darkred" strokeDasharray="5 5" label={`Flooding (${thresholds.flooding})`} />
-                    <Tooltip formatter={(v) => `${v} NTU`} labelFormatter={(label, payload) => (payload && payload[0] ? payload[0].payload.fullDate.toLocaleString() : label)} />
-                    <Line type="monotone" dataKey="value" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 6 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <div className="h-64 flex items-center justify-center text-gray-500">No data available</div>
-            )}
-          </div>
+    String payload; serializeJson(doc, payload);
 
-          {/* Distribution & accumulation */}
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded shadow">
-              <h3 className="text-lg font-semibold mb-4">Sediment Distribution Analysis</h3>
-              <div style={{ width: '100%', height: 240 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={[
-                    { name: `0-${Math.max(0, Math.floor(thresholds.normal - 1))}`, count: distribution.normal },
-                    { name: `${thresholds.normal}-${Math.max(thresholds.warning - 1, thresholds.normal)}`, count: Math.floor(distribution.warning / 2) },
-                    { name: `${thresholds.warning}-${Math.max(thresholds.highRisk - 1, thresholds.warning)}`, count: Math.floor(distribution.warning / 2) },
-                    { name: `${thresholds.highRisk}-${Math.max(thresholds.clogging - 1, thresholds.highRisk)}`, count: distribution.danger },
-                    { name: `${thresholds.clogging}+`, count: distribution.critical }
-                  ]}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="name" />
-                    <YAxis />
-                    <Tooltip />
-                    <Bar dataKey="count" fill="#7c3aed" radius={[4,4,0,0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="text-xs text-gray-500 mt-2">Distribution of readings showing sediment levels in the water.</div>
-            </div>
-
-            <div className="bg-white p-6 rounded shadow">
-              <h3 className="text-lg font-semibold mb-4">Sediment Accumulation Rate (Δ NTU/hr)</h3>
-              <div style={{ width: '100%', height: 240 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={turbidityData.map((d, i, arr) => {
-                    if (i === 0) return { time: d.time, rate: 0 };
-                    const prev = arr[i - 1];
-                    let dtHours = (new Date(d.fullDate) - new Date(prev.fullDate)) / 3600000;
-                    // Clamp to avoid division by tiny gaps; minimum 5 seconds equivalent
-                    if (!dtHours || dtHours < (5/3600)) dtHours = 5/3600;
-                    let diff = (d.ntuValue - prev.ntuValue) / dtHours;
-                    // Avoid artificial -200 floor; allow larger negative (clearing) values but cap extremes
-                    if (diff < -10000) diff = -10000;
-                    if (diff > thresholds.flooding * 2) diff = thresholds.flooding * 2;
-                    return { time: d.time, rate: Number(diff.toFixed(2)) };
-                  })}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" />
-                    <YAxis label={{ value: 'Δ NTU/hr', angle: -90, position: 'insideLeft' }} />
-                    <Tooltip />
-                    <Line type="monotone" dataKey="rate" stroke="#ef4444" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="text-xs text-gray-500 mt-2">Positive = sediment accumulating (clogging risk); Negative = sediment clearing (rain or cleaning)</div>
-            </div>
-          </div>
-        </div>
-
-        {/* manual refresh and print */}
-        <div className="flex justify-center gap-4">
-          <button onClick={fetchTurbidityData} className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 px-8 rounded shadow inline-flex items-center">
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581" /></svg>
-            Manual Refresh
-          </button>
-          
-          <button 
-            onClick={() => setShowPrintModal(true)}
-            disabled={turbidityData.length === 0 || !isAdmin}
-            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-medium py-3 px-8 rounded shadow inline-flex items-center"
-            title={!isAdmin ? 'Admin access required to print records' : 'Print sediment monitoring records'}
-          >
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
-            {!isAdmin ? '🔒 Print (Admin Only)' : 'Print Records'}
-          </button>
-        </div>
-
-        {/* Print Modal */}
-        {showPrintModal && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-            <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
-              <div className="mt-3">
-                <h3 className="text-lg font-semibold">Select Date Range for Print</h3>
-                <div className="mt-4">
-                  <div className="mb-4">
-                    <label className="block text-sm text-gray-700 mb-2">Start Date & Time</label>
-                    <div className="flex space-x-2">
-                      <input
-                        type="datetime-local"
-                        className="w-full p-2 border rounded"
-                        onChange={(e) => setPrintRange(prev => ({ ...prev, start: e.target.value }))}
-                      />
-                    </div>
-                  </div>
-                  <div className="mb-4">
-                    <label className="block text-sm text-gray-700 mb-2">End Date & Time</label>
-                    <div className="flex space-x-2">
-                      <input
-                        type="datetime-local"
-                        className="w-full p-2 border rounded"
-                        onChange={(e) => setPrintRange(prev => ({ ...prev, end: e.target.value }))}
-                      />
-                    </div>
-                  </div>
-                </div>
-                <div className="flex justify-end space-x-3 mt-6">
-                  <button
-                    onClick={() => setShowPrintModal(false)}
-                    className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (printRange.start && printRange.end) {
-                        handlePrint(printRange);
-                        setShowPrintModal(false);
-                      }
-                    }}
-                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-blue-300"
-                    disabled={!printRange.start || !printRange.end}
-                  >
-                    Print
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-export default Dashboard;
+    int code = http.POST(payload);
+    if (code == 201 || code == 200) Serial.println("Risk assessment sent successfully.");
+    else {
+      Serial.print("Error sending risk assessment: "); Serial.println(code);
+      Serial.println(http.getString());
+    }
+    http.end();
+  }

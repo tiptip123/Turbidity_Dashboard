@@ -9,12 +9,13 @@ import {
 
 // NTU THRESHOLDS (aligned with ESP32 sketch NTU bands)
 // These values match the ESP32 device thresholds used for risk assessment
+// ESP32 calibration uses NTU scale up to ~300 and thresholds at 50/150/250
 const thresholds = {
-  normal: 2200.0,        // Clear water - normal flow
-  warning: 2500.0,       // Light sediment / inspect soon
-  highRisk: 3000.0,      // Significant sedimentation risk
-  clogging: 3500.0,      // High probability of clogging
-  flooding: 3800.0       // Immediate flooding risk
+  normal: 50.0,        // Clear
+  warning: 150.0,      // Moderate
+  highRisk: 250.0,     // High
+  clogging: 300.0,     // Clogging / device max
+  flooding: 300.0      // Flooding treated same as clogging on this scale
 };
 
 const Dashboard = ({ isAdmin = false }) => {
@@ -171,35 +172,27 @@ const Dashboard = ({ isAdmin = false }) => {
     return false;
   };
 
-  // ✅ CORRECTED: Convert raw sensor value to NTU using ESP32 calibration
+  // ✅ CORRECTED: Convert raw sensor value to NTU using ESP32 sketch calibration
+  // Matches ESP32: RAW_CLEAR = 2380 -> 0 NTU, RAW_TURBID = 269 -> NTU_MAX (300)
   const convertRawToNTU = (rawValue) => {
     let raw = Number(rawValue);
     if (Number.isNaN(raw)) return 0;
 
-    // Clamp input to ESP32 expected range (same as ESP32 code)
-    if (raw < 6) raw = 6;
-    if (raw > 2097) raw = 2097;
+    // ESP32 ADC range is 0-4095; clamp to that
+    if (raw < 0) raw = 0;
+    if (raw > 4095) raw = 4095;
 
-    // Linear mapping equivalent to Arduino map() but returning float
-    const linearMap = (x, inMin, inMax, outMin, outMax) => {
-      if (inMax === inMin) return outMin;
-      const t = (x - inMin) / (inMax - inMin);
-      return outMin + t * (outMax - outMin);
-    };
+    const RAW_CLEAR = 2380.0;
+    const RAW_TURBID = 269.0;
+    const NTU_MAX = 300.0;
 
-    let ntu;
-    if (raw >= 2000) {
-      // Clear water range: raw 2000-2097 -> NTU 50-0
-      ntu = linearMap(raw, 2000, 2097, 50, 0);
-    } else {
-      // Sediment range: raw 6-2000 -> NTU 3000-50
-      ntu = linearMap(raw, 6, 2000, 3000, 50);
-    }
+    if (raw >= RAW_CLEAR) return 0.0;
+    if (raw <= RAW_TURBID) return NTU_MAX;
 
-    // Clamp final NTU and round to one decimal place
-    if (ntu < 0) ntu = 0;
-    if (ntu > 3000) ntu = 3000;
-    return Math.round(ntu * 10) / 10;
+    const ntu = ((RAW_CLEAR - raw) * NTU_MAX) / (RAW_CLEAR - RAW_TURBID);
+    // Clamp and round to one decimal
+    const clamped = Math.max(0, Math.min(NTU_MAX, ntu));
+    return Math.round(clamped * 10) / 10;
   };
 
   // ✅ CORRECTED: Process sensor value - use ntu_value if available, otherwise convert from raw_value
