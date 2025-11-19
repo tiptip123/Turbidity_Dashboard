@@ -1,3 +1,5 @@
+
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
 import {
@@ -13,18 +15,6 @@ const thresholds = {
   highRisk: 3000.0,      // Significant sedimentation risk
   clogging: 3500.0,      // High probability of clogging
   flooding: 3800.0       // Immediate flooding risk
-};
-
-// Sediment load calculation constants
-const SEDIMENT_CALIBRATION = {
-  // Empirical formula coefficients for sediment concentration (mg/L) = a * NTU + b
-  a: 1.2,  // Slope - varies by sediment type
-  b: 5.0,  // Intercept - background turbidity
-  // Fixed flow rate assumption for urban drainage (m³/s)
-  flowRate: 0.5, // Normal runoff conditions
-  // Conversion factors
-  MG_TO_KG: 0.000001,
-  HOURS_TO_DAYS: 24
 };
 
 const Dashboard = ({ isAdmin = false }) => {
@@ -56,16 +46,6 @@ const Dashboard = ({ isAdmin = false }) => {
     normal: 0, warning: 0, danger: 0, critical: 0
   });
 
-  // SEDIMENT LOAD CALCULATIONS
-  const [sedimentLoad, setSedimentLoad] = useState({
-    current: 0,           // kg/m³ current sediment load
-    concentration: 0,     // mg/L current concentration
-    hourlyRate: 0,        // kg/hour sediment transport rate
-    dailyTotal: 0,        // kg/day total sediment transport
-    accumulated: 0,       // kg total accumulated sediment
-    loadTrend: 'stable'   // trend of sediment load
-  });
-
   const [timeRange, setTimeRange] = useState('today'); // 'today' | 'week' | 'month'
 
   const lastDataId = useRef(0);
@@ -92,58 +72,6 @@ const Dashboard = ({ isAdmin = false }) => {
       // ignore
     }
   }, [isDark]);
-
-  // SEDIMENT LOAD CALCULATION FUNCTIONS
-  const calculateSedimentConcentration = useCallback((ntuValue) => {
-    // Empirical formula: Sediment concentration (mg/L) = a * NTU + b
-    return SEDIMENT_CALIBRATION.a * ntuValue + SEDIMENT_CALIBRATION.b;
-  }, []);
-
-  const calculateSedimentLoad = useCallback((ntuValue) => {
-    const concentration = calculateSedimentConcentration(ntuValue); // mg/L
-    // Convert to kg/m³: (mg/L) * (kg/1,000,000 mg) * (1000 L/m³) = kg/m³
-    const loadKgPerM3 = concentration * SEDIMENT_CALIBRATION.MG_TO_KG * 1000;
-    return loadKgPerM3;
-  }, [calculateSedimentConcentration]);
-
-  const calculateSedimentTransportRate = useCallback((ntuValue) => {
-    const concentration = calculateSedimentConcentration(ntuValue); // mg/L
-    // Transport rate (kg/hour) = concentration (mg/L) * flow (m³/s) * 3.6
-    const transportRate = concentration * SEDIMENT_CALIBRATION.flowRate * 3.6 * SEDIMENT_CALIBRATION.MG_TO_KG * 1000;
-    return transportRate;
-  }, [calculateSedimentConcentration]);
-
-  const updateSedimentLoadMetrics = useCallback((turbidityData, currentNTU) => {
-    if (!turbidityData || turbidityData.length === 0) return;
-
-    const currentConcentration = calculateSedimentConcentration(currentNTU);
-    const currentLoad = calculateSedimentLoad(currentNTU);
-    const currentTransportRate = calculateSedimentTransportRate(currentNTU);
-    
-    // Calculate daily total (kg/day)
-    const dailyTransport = currentTransportRate * 24;
-    
-    // Calculate accumulated sediment (simplified - would need time integration in production)
-    const averageConcentration = turbidityData.reduce((sum, point) => 
-      sum + calculateSedimentConcentration(point.ntuValue), 0) / turbidityData.length;
-    const averageTransport = averageConcentration * SEDIMENT_CALIBRATION.flowRate * 3.6 * SEDIMENT_CALIBRATION.MG_TO_KG * 1000;
-    const estimatedAccumulated = averageTransport * 24; // kg accumulated today
-    
-    // Calculate load trend
-    const recentData = turbidityData.slice(-10);
-    const loadTrend = recentData.length >= 2 ? 
-      (calculateSedimentLoad(recentData[recentData.length - 1].ntuValue) > 
-       calculateSedimentLoad(recentData[0].ntuValue) ? 'rising' : 'falling') : 'stable';
-
-    setSedimentLoad({
-      current: Number(currentLoad.toFixed(4)),
-      concentration: Math.round(currentConcentration),
-      hourlyRate: Number(currentTransportRate.toFixed(2)),
-      dailyTotal: Math.round(dailyTransport),
-      accumulated: Math.round(estimatedAccumulated),
-      loadTrend: loadTrend
-    });
-  }, [calculateSedimentConcentration, calculateSedimentLoad, calculateSedimentTransportRate]);
 
   const toggleTheme = () => setIsDark(d => !d);
   const handleLogout = async () => {
@@ -497,15 +425,12 @@ const determineAlertLevel = useCallback((latest, average, trend) => {
     computeAccumulationMetrics(formatted);
     computeDistribution(values);
     
-    // UPDATE SEDIMENT LOAD METRICS
-    updateSedimentLoadMetrics(formatted, latest);
-    
     setTurbidityData(formatted.slice(-1000));
     chartDataRef.current = formatted.slice(-1000);
     setStats({ latest, average: Math.round(average), highest, trend });
     setAlertLevel(alert);
     setRiskAssessment(risk);
-  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk, updateSedimentLoadMetrics]);
+  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk]);
 
   // incremental update for small inserts
   const updateStatsIncrementally = useCallback((data) => {
@@ -520,13 +445,10 @@ const determineAlertLevel = useCallback((latest, average, trend) => {
     computeAccumulationMetrics(data);
     computeDistribution(values);
     
-    // UPDATE SEDIMENT LOAD METRICS
-    updateSedimentLoadMetrics(data, latest);
-    
     setStats({ latest, average: Math.round(avg), highest, trend });
     setAlertLevel(alert);
     setRiskAssessment(risk);
-  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk, updateSedimentLoadMetrics]);
+  }, [computeAccumulationMetrics, computeDistribution, determineAlertLevel, predictCloggingRisk]);
 
   // ✅ UPDATED: fetch only new rows since last id
   const fetchNewData = useCallback(async (sinceId) => {
@@ -869,30 +791,6 @@ const handlePrint = (selectedRange = null) => {
           </div>
         </div>
 
-        <!-- SEDIMENT LOAD SUMMARY -->
-        <div class="sediment-summary">
-          <div class="sediment-item">
-            <strong>Concentration</strong>
-            <span>${sedimentLoad.concentration} mg/L</span>
-          </div>
-          <div class="sediment-item">
-            <strong>Current Load</strong>
-            <span>${sedimentLoad.current} kg/m³</span>
-          </div>
-          <div class="sediment-item">
-            <strong>Transport Rate</strong>
-            <span>${sedimentLoad.hourlyRate} kg/hr</span>
-          </div>
-          <div class="sediment-item">
-            <strong>Daily Total</strong>
-            <span>${sedimentLoad.dailyTotal} kg/day</span>
-          </div>
-          <div class="sediment-item">
-            <strong>Accumulated</strong>
-            <span>${sedimentLoad.accumulated} kg</span>
-          </div>
-        </div>
-
         ${riskAssessment ? `
         <div style="margin: 20px 0; padding: 15px; background: ${alertLevel === 'flooding' || alertLevel === 'clogging' ? '#fee' : alertLevel === 'highRisk' ? '#fff3e0' : '#fff8e1'}; border-left: 4px solid ${alertLevel === 'flooding' || alertLevel === 'clogging' ? 'red' : alertLevel === 'highRisk' ? 'orange' : 'yellow'};">
           <strong>Risk Assessment:</strong> ${riskAssessment.risk}<br>
@@ -911,13 +809,11 @@ const handlePrint = (selectedRange = null) => {
               <th>Date & Time</th>
               <th>NTU Value</th>
               <th>Raw Sensor Value</th>
-              <th>Sediment Concentration</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody>
             ${filteredData.map((record, index) => {
-              const concentration = calculateSedimentConcentration(record.value);
               let statusClass = 'status-normal';
               let statusText = 'Clear Water';
               if (record.value >= thresholds.flooding) {
@@ -939,7 +835,6 @@ const handlePrint = (selectedRange = null) => {
                   <td>${record.fullDate.toLocaleString()}</td>
                   <td>${record.value.toFixed(2)}</td>
                   <td>${record.rawValue ?? record.originalValue ?? 'N/A'}</td>
-                  <td>${concentration.toFixed(1)} mg/L</td>
                   <td class="${statusClass}">${statusText}</td>
                 </tr>
               `;
@@ -950,7 +845,6 @@ const handlePrint = (selectedRange = null) => {
         <div class="footer">
           <p>Report generated from Turbidity Dashboard | ${new Date().toLocaleString()}</p>
           <p>Thresholds: Normal (&lt;${thresholds.normal} NTU), Warning (${thresholds.normal}–${thresholds.warning} NTU), High Risk (${thresholds.warning}–${thresholds.highRisk} NTU), Clogging (${thresholds.highRisk}–${thresholds.clogging} NTU), Flooding (&gt;=${thresholds.flooding} NTU)</p>
-          <p>Sediment Calculation: Concentration = ${SEDIMENT_CALIBRATION.a} × NTU + ${SEDIMENT_CALIBRATION.b} mg/L | Flow Rate: ${SEDIMENT_CALIBRATION.flowRate} m³/s</p>
         </div>
       </body>
     </html>
@@ -1168,47 +1062,6 @@ const handlePrint = (selectedRange = null) => {
             <div className="text-sm font-semibold text-gray-600">Trend</div>
             <div className="text-2xl font-bold">{getTrendIcon(stats.trend)}</div>
             <div className="text-xs text-gray-500 mt-1">{stats.trend}</div>
-          </div>
-        </div>
-
-        {/* SEDIMENT LOAD ANALYTICS PANEL */}
-        <div className="bg-white rounded-lg shadow-md p-6 mb-8">
-          <h3 className="text-xl font-semibold text-gray-800 mb-4">Sediment Load Calculations</h3>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-            <div className="bg-blue-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-blue-700">Concentration</div>
-              <div className="text-2xl font-bold text-blue-800">{sedimentLoad.concentration} mg/L</div>
-              <div className="text-xs text-blue-600 mt-1">Sediment in water</div>
-            </div>
-
-            <div className="bg-green-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-green-700">Current Load</div>
-              <div className="text-2xl font-bold text-green-800">{sedimentLoad.current} kg/m³</div>
-              <div className="text-xs text-green-600 mt-1">Sediment density</div>
-            </div>
-
-            <div className="bg-orange-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-orange-700">Transport Rate</div>
-              <div className="text-2xl font-bold text-orange-800">{sedimentLoad.hourlyRate} kg/hr</div>
-              <div className="text-xs text-orange-600 mt-1">Sediment moving</div>
-            </div>
-
-            <div className="bg-purple-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-purple-700">Daily Total</div>
-              <div className="text-2xl font-bold text-purple-800">{sedimentLoad.dailyTotal} kg/day</div>
-              <div className="text-xs text-purple-600 mt-1">Estimated daily transport</div>
-            </div>
-
-            <div className="bg-red-50 p-4 rounded-lg">
-              <div className="text-sm font-semibold text-red-700">Accumulated</div>
-              <div className="text-2xl font-bold text-red-800">{sedimentLoad.accumulated} kg</div>
-              <div className="text-xs text-red-600 mt-1">Total sediment today</div>
-            </div>
-          </div>
-
-          <div className="mt-4 text-sm text-gray-600">
-            <strong>Calculation Method:</strong> Sediment concentration = {SEDIMENT_CALIBRATION.a} × NTU + {SEDIMENT_CALIBRATION.b} mg/L | Flow rate: {SEDIMENT_CALIBRATION.flowRate} m³/s
           </div>
         </div>
 
